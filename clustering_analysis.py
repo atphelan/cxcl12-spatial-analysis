@@ -1,10 +1,13 @@
 from utils import Folder
 
 import pandas as pd
+# import json
+# import operator
 import numpy as np
 from scipy.spatial import cKDTree
 from shapely.geometry import Point
 from shapely.ops import unary_union
+from sklearn.cluster import KMeans
 import random
 
 import matplotlib.pyplot as plt
@@ -189,16 +192,36 @@ def build_mask(points, buffer_radius=5.0):
 # -------------------------
 # Sample uniformly in mask
 # -------------------------
-def sample_points_in_region(region, n_points):
+def sample_points_in_region(region, n_points, sep_min, max_attempts=100000):
     minx, miny, maxx, maxy = region.bounds
     samples = []
 
-    while len(samples) < n_points:
+    tree = None
+    attempts = 0
+
+    while len(samples) < n_points and attempts < max_attempts:
+        attempts += 1
+
         x = random.uniform(minx, maxx)
         y = random.uniform(miny, maxy)
 
-        if region.contains(Point(x, y)):
-            samples.append([x, y])
+        if not region.contains(Point(x, y)):
+            continue
+
+        if tree is not None:
+            # Query nearest existing point
+            dist, _ = tree.query([x, y], k=1)
+            if dist < sep_min:
+                continue
+
+        # Accept point
+        samples.append([x, y])
+
+        # Rebuild tree periodically (cheap enough for moderate sizes)
+        tree = cKDTree(samples)
+
+    if len(samples) < n_points:
+        print(f"Warning: only placed {len(samples)} points after {attempts} attempts")
 
     return np.array(samples)
 
@@ -206,7 +229,7 @@ def sample_points_in_region(region, n_points):
 # -------------------------
 # Run CSR simulation
 # -------------------------
-def csr_simulation(points, n_sim=10, k=5, buffer_radius=5.0, fname=None):
+def csr_simulation(points, n_sim=10, k=5, buffer_radius=5.0, sep_min=0, fname=None):
     n = len(points)
 
     # observed statistic
@@ -217,7 +240,7 @@ def csr_simulation(points, n_sim=10, k=5, buffer_radius=5.0, fname=None):
 
     sims = []
     for _ in range(n_sim):
-        sim_pts = sample_points_in_region(region, n)
+        sim_pts = sample_points_in_region(region, n, sep_min=sep_min)
         sims.append(mean_kNN_distance(sim_pts, k=k))
 
     sims = np.array(sims)
@@ -245,58 +268,318 @@ def csr_simulation(points, n_sim=10, k=5, buffer_radius=5.0, fname=None):
         "sim_values": sims
     }
 
+# # -------------------------
+# # Load points
+# # -------------------------
+# def load_points(path):
+#     df = pd.read_csv(path)
+#     return df[['X', 'Y']].values
 
-target_directory = Folder('data')
 
-for file in target_directory.files:
-    if file.type == 'csv' and 'analysed' not in file.path:
-        df = pd.read_csv(file.path)
-        df.index = df[' ']
-        df.drop(columns=[' '], inplace=True)
+# # -------------------------
+# # Compute bounding area
+# # -------------------------
+# def compute_area(points):
+#     xmin, ymin = points.min(axis=0)
+#     xmax, ymax = points.max(axis=0)
+#     return (xmax - xmin) * (ymax - ymin)
 
-        coords = df[['X', 'Y']].values
-        tree = cKDTree(coords)
 
-        # Query k=6 because the first neighbour is the point itself
-        dists, indices = tree.query(coords, k=6)
+# -------------------------
+# Clark–Evans index
+# -------------------------
+def clark_evans(points):
+    n = len(points)
+    area = compute_area(points)
+    density = n / area
 
-        # Remove self (first column)
-        dists = dists[:, 1:]
-        indices = indices[:, 1:] + min(df.index) # Also start counting from 1 as in the data
+    tree = cKDTree(points)
+    dists, _ = tree.query(points, k=2)  # k=2 includes self
+    nn = dists[:, 1]
 
-        # Nearest neighbour (k=1 after removing self)
-        df['Nearest neighbour ID'] = indices[:, 0]
-        df['Distance to nearest neighbour'] = dists[:, 0]
+    r_obs = nn.mean()
+    r_exp = 1 / (2 * np.sqrt(density))
 
-        # Top 5 neighbours
-        df['5 nearest neighbour IDs'] = list(indices)
-        df['Mean distance to 5 nearest neighbours'] = dists.mean(axis=1)
+    R = r_obs / r_exp
+    return R, r_obs, r_exp
 
-        # Global mean
-        global_mean_5nn = df['Mean distance to 5 nearest neighbours'].mean()
 
-        # Optional: mean pairwise distance (vectorised)
-        diff = coords[:, None, :] - coords[None, :, :]
-        pairwise_dists = np.sqrt((diff ** 2).sum(axis=2))
-        mean_pairwise = pairwise_dists.sum(axis=1) / (len(df) - 1)
-        df['Mean pairwise distance'] = mean_pairwise
+# -------------------------
+# Density proxy per point
+# -------------------------
+def local_density(points, k=5):
+    tree = cKDTree(points)
+    dists, _ = tree.query(points, k=k+1)
+    mean_knn = dists[:, 1:].mean(axis=1)
+    return 1 / mean_knn  # inverse distance ≈ density
 
-        points = load_points(file.path)
+
+# -------------------------
+# Split into density groups
+# -------------------------
+def split_density_regions(points, n_regions=3):
+    dens = local_density(points)
+
+    # cluster by density only (not spatial position)
+    km = KMeans(n_clusters=n_regions, n_init=10)
+    labels = km.fit_predict(dens.reshape(-1, 1))
+
+    regions = []
+    for i in range(n_regions):
+        region_pts = points[labels == i]
+        if len(region_pts) > 5:  # avoid tiny groups
+            regions.append(region_pts)
+
+    return regions
+
+
+# -------------------------
+# Full analysis
+# -------------------------
+def analyze_clark_evans(points, n_regions=3):
+    results = {}
+
+    # overall
+    R, r_obs, r_exp = clark_evans(points)
+    results["overall"] = {"R": R, "r_obs": r_obs, "r_exp": r_exp}
+
+    # regions
+    regions = split_density_regions(points, n_regions)
+
+    region_results = []
+    for i, pts in enumerate(regions):
+        R, r_obs, r_exp = clark_evans(pts)
+        region_results.append({
+            "region": i,
+            "n_points": len(pts),
+            "R": R,
+            "r_obs": r_obs,
+            "r_exp": r_exp
+        })
+
+    results["regions"] = region_results
+    return results
+
+# -------------------------
+# Build grid
+# -------------------------
+def make_grid(points, n_cells=100):
+    xmin, ymin = points.min(axis=0)
+    xmax, ymax = points.max(axis=0)
+
+    x_edges = np.linspace(xmin, xmax, n_cells + 1)
+    y_edges = np.linspace(ymin, ymax, n_cells + 1)
+
+    return x_edges, y_edges
+
+
+# -------------------------
+# Pixel centers
+# -------------------------
+def grid_centers(x_edges, y_edges):
+    xc = (x_edges[:-1] + x_edges[1:]) / 2
+    yc = (y_edges[:-1] + y_edges[1:]) / 2
+
+    xv, yv = np.meshgrid(xc, yc)
+    centers = np.column_stack([xv.ravel(), yv.ravel()])
+
+    return centers, xv.shape
+
+
+# -------------------------
+# Density calculation
+# -------------------------
+def compute_density(points, centers, tol=None):
+    tree = cKDTree(points)
+
+    if tol is None:
+        # simple binning (count points per nearest pixel)
+        # assign each point to nearest center
+        _, idx = tree.query(centers, k=1)
+        # NOTE: this is not ideal for binning; better use histogram2d below
+        raise ValueError("Use histogram2d for simple counts")
+    else:
+        # count points within radius of each pixel center
+        counts = []
+        for c in centers:
+            neighbors = tree.query_ball_point(c, tol)
+            counts.append(len(neighbors))
+
+        return np.array(counts)
+
+
+# -------------------------
+# Fast raw counts per pixel
+# -------------------------
+def compute_counts_hist(points, x_edges, y_edges):
+    H, _, _ = np.histogram2d(
+        points[:, 0],
+        points[:, 1],
+        bins=[x_edges, y_edges]
+    )
+    return H.T  # match meshgrid orientation
+
+
+# -------------------------
+# Save to CSV
+# -------------------------
+def save_grid(x_edges, y_edges, values, out_path):
+    xc = (x_edges[:-1] + x_edges[1:]) / 2
+    yc = (y_edges[:-1] + y_edges[1:]) / 2
+
+    rows = []
+    for i, y in enumerate(yc):
+        for j, x in enumerate(xc):
+            rows.append({
+                "X_center": x,
+                "Y_center": y,
+                "density": values[i, j]
+            })
+
+    df = pd.DataFrame(rows)
+    df.to_csv(out_path, index=False)
+
+    plt.figure()
+
+    # extent ensures axes match real coordinates
+    extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
+
+    plt.imshow(
+        df['density'].to_numpy().reshape((len(x_edges) - 1, len(y_edges) - 1)),
+        origin='lower',
+        extent=extent,
+        aspect='auto'
+    )
+
+    plt.colorbar(label="Density")
+    plt.xlabel("X")
+    plt.ylabel("Y")
+    plt.title("Density heatmap")
+
+    plt.savefig('images' + out_path[4:-4] + '.png', dpi=300, bbox_inches='tight')
+    plt.close()
+
+
+def analyse_files(target_directory):
+    for file in target_directory.files:
+        if file.type == 'csv' and 'analysed' not in file.path:
+            df = pd.read_csv(file.path)
+            df.index = df[' ']
+            df.drop(columns=[' '], inplace=True)
+
+            coords = df[['X', 'Y']].values
+            tree = cKDTree(coords)
+
+            # Query k=6 because the first neighbour is the point itself
+            dists, indices = tree.query(coords, k=6)
+
+            # Remove self (first column)
+            dists = dists[:, 1:]
+            indices = indices[:, 1:] + min(df.index) # Also start counting from 1 as in the data
+
+            # Nearest neighbour (k=1 after removing self)
+            df['Nearest neighbour ID'] = indices[:, 0]
+            df['Distance to nearest neighbour'] = dists[:, 0]
+
+            # Top 5 neighbours
+            df['5 nearest neighbour IDs'] = list(indices)
+            df['Mean distance to 2 nearest neighbours'] = dists[:,0:2].mean(axis=1)
+            df['Mean distance to 5 nearest neighbours'] = dists.mean(axis=1)
+            df['Density based on 5nn'] = 1/df['Mean distance to 5 nearest neighbours']
+
+            # # Global mean
+            # global_mean_2nn = df['Mean distance to 2 nearest neighbours'].mean()
+            # global_mean_5nn = df['Mean distance to 5 nearest neighbours'].mean()
+
+            # Optional: mean pairwise distance (vectorised)
+            diff = coords[:, None, :] - coords[None, :, :]
+            pairwise_dists = np.sqrt((diff ** 2).sum(axis=2))
+            min_dist = pairwise_dists.min()
+            mean_pairwise = pairwise_dists.sum(axis=1) / (len(df) - 1)
+            std_pairwise = None
+            df['Mean pairwise distance'] = mean_pairwise
+
+            points = load_points(file.path)
+        
+            print(file.name)
+
+            result = csr_simulation(
+                points,
+                n_sim=30,
+                k=2,
+                buffer_radius=15.0,
+                sep_min=min_dist,
+                fname=file.path
+            )
+
+            for k, v in result.items():
+                result[k] = np.round(v, 2)
+
+            print(result, '\n')
+
+            # Save output
+            df.to_csv(file.path[:-4] + '_analysed.csv', index=False)
+
+
+            # Heatmap of density
+            n_cells = 50  # 100x100 = 10,000 pixels
+            tol = 50.0      # tolerance radius (set None for raw counts)
+
+            x_edges, y_edges = make_grid(points, n_cells)
+            centers, shape = grid_centers(x_edges, y_edges)
+
+            if tol is None:
+                density = compute_counts_hist(points, x_edges, y_edges)
+            else:
+                counts = compute_density(points, centers, tol)
+                density = counts.reshape(shape)
+
+            save_grid(x_edges, y_edges, density, f"{file.path[:-4]}_analysed_density_map.csv")
+
+
+def make_summary_table(target_directory):
+    data_dict_list = []
+    for file in target_directory.files:
+        if file.type == 'csv' and 'analysed.' in file.path:
+            df = pd.read_csv(file.path)
+            global_mean_2nn = round(df['Mean distance to 2 nearest neighbours'].mean(),2)
+            global_mean_5nn = round(df['Mean distance to 5 nearest neighbours'].mean(),2)
+            # data_dict.update({file.name[:-4]: global_mean_5nn})
+            data_dict_list.append({'name': file.name.split('annotation')[0][:-1] + ('_' + file.name[-14] if str.isdigit(file.name[-14]) else ''), 'Mean 2nn distance': global_mean_2nn, 'Mean 5nn distance': global_mean_5nn})
     
-        print(file.name)
+            # -------------------------
+            # Clark-Evans index analysis of clustering
+            # -------------------------
 
-        result = csr_simulation(
-            points,
-            n_sim=30,
-            k=2,
-            buffer_radius=15.0,
-            fname=file.path
-        )
+            points = load_points(file.path)
+            results = analyze_clark_evans(points, n_regions=3)
 
-        for k, v in result.items():
-            result[k] = np.round(v, 2)
+            print("\nOverall Clark-Evans:")
+            print(results["overall"])
+            data_dict_list[-1].update({'Overall Clark-Evans': results['overall']})
 
-        print(result, '\n')
+            print("\nRegions:")
+            for r in results["regions"]:
+                print(r)
+                data_dict_list[-1].update({f'Region {r["region"]} Clark-Evans': r['R'], f'Region {r["region"]} density': 1/r['r_obs'], f'Number of points in region {r["region"]}': r['n_points']})
+            
+            density_data = pd.read_csv(file.path[:-12] + 'analysed_density_map.csv')
+            
+            density_data['density class'] = density_data['density'] < 1E-8
+            density_data = density_data.loc[~density_data['density class']]
+            mean_density = 10 #density_data['density'].mean() # Seems to be a good middling density to divide regions at
+            density_data['density class'] = density_data['density'] > mean_density # WILL ALWAYS GIVE 50:50 if you compare to mean!
 
-        # Save output
-        df.to_csv(file.path[:-4] + '_analysed.csv', index=False)
+            data_dict_list[-1].update({'Percentage coverage high density pixels': round(100*density_data['density class'].mean(), 1)})
+            
+    # sorted_dict = dict(sorted(data_dict.items(), key=operator.itemgetter(0)))
+    # with open('analysed_data_summary.json', 'w') as f:
+    #     json.dump(sorted_dict, f)
+    pd.DataFrame(data_dict_list).sort_values('name').to_csv('analysed_data_summary.csv')
+
+
+if __name__ == '__main__':
+    target_directory = Folder('data')
+    # analyse_files(target_directory)
+    make_summary_table(target_directory)
+

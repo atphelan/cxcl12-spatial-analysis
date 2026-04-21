@@ -173,6 +173,8 @@ def plotly_2lines(df1, x1, y1, df2, x2, y2, colours=('red', 'blue')):
 		linecolor='black',
 		mirror=True,
 		# range=[0.0, 45.0]
+		scaleanchor="x",
+		scaleratio=1,
 	)
 
 	return fig
@@ -270,6 +272,8 @@ def demo_plot(df, x, y, c, lookup_df, colourscheme='Viridis'):
 		mirror=True,
 		# dtick=1,
 		# range=[0.0, 45.0],
+		scaleanchor="x",
+		scaleratio=1,
 	)
 	return fig
 
