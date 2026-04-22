@@ -229,7 +229,7 @@ def sample_points_in_region(region, n_points, sep_min, max_attempts=100000):
 # -------------------------
 # Run CSR simulation
 # -------------------------
-def csr_simulation(points, n_sim=10, k=5, buffer_radius=5.0, sep_min=0, fname=None):
+def csr_simulation(points, n_sim=10, k=5, buffer_radius=15.0, sep_min=0, fname=None):
     n = len(points)
 
     # observed statistic
@@ -250,6 +250,8 @@ def csr_simulation(points, n_sim=10, k=5, buffer_radius=5.0, sep_min=0, fname=No
     plt.scatter(sim_pts[:, 0], sim_pts[:, 1], s=5, label="CSR", alpha=0.6)
     plt.legend()
     plt.title("Real vs CSR point patterns")
+    plt.xlabel(r"$X \ (\mu m)$")
+    plt.ylabel(r"$Y \ (\mu m)$")
     plt.axis("equal")
     plt.savefig(fname[:-4] + '_simulated.png')
     plt.close()
@@ -363,12 +365,25 @@ def analyze_clark_evans(points, n_regions=3):
 # -------------------------
 # Build grid
 # -------------------------
-def make_grid(points, n_cells=100):
+def make_grid(points, n_cells=100, margin=0):
     xmin, ymin = points.min(axis=0)
     xmax, ymax = points.max(axis=0)
 
-    x_edges = np.linspace(xmin, xmax, n_cells + 1)
-    y_edges = np.linspace(ymin, ymax, n_cells + 1)
+    x_edges = np.linspace(xmin-margin, xmax+margin, n_cells + 1)
+    y_edges = np.linspace(ymin-margin, ymax+margin, n_cells + 1)
+    # Adding a 20 unit margin so features don't get cut off
+
+    return x_edges, y_edges
+
+def make_equal_axis_grid(points, target_n_cells=100, margin=0):
+    xmin, ymin = points.min(axis=0)
+    xmax, ymax = points.max(axis=0)
+
+    nx = target_n_cells * (xmax - xmin)/(ymax - ymin)
+
+    x_edges = np.linspace(xmin-margin, xmax+margin, int(nx) + 1)
+    y_edges = np.linspace(ymin-margin, ymax+margin, int(target_n_cells**2/nx) + 1)
+    # Adding a 20 unit margin so features don't get cut off
 
     return x_edges, y_edges
 
@@ -389,23 +404,15 @@ def grid_centers(x_edges, y_edges):
 # -------------------------
 # Density calculation
 # -------------------------
-def compute_density(points, centers, tol=None):
+def compute_density(points, centers, tol):
     tree = cKDTree(points)
+    # count points within radius tol of each pixel center
+    counts = []
+    for c in centers:
+        neighbors = tree.query_ball_point(c, tol)
+        counts.append(len(neighbors)/(np.pi*tol**2/100))
 
-    if tol is None:
-        # simple binning (count points per nearest pixel)
-        # assign each point to nearest center
-        _, idx = tree.query(centers, k=1)
-        # NOTE: this is not ideal for binning; better use histogram2d below
-        raise ValueError("Use histogram2d for simple counts")
-    else:
-        # count points within radius of each pixel center
-        counts = []
-        for c in centers:
-            neighbors = tree.query_ball_point(c, tol)
-            counts.append(len(neighbors))
-
-        return np.array(counts)
+    return np.array(counts)
 
 
 # -------------------------
@@ -433,7 +440,7 @@ def save_grid(x_edges, y_edges, values, out_path):
             rows.append({
                 "X_center": x,
                 "Y_center": y,
-                "density": values[i, j]
+                "Density (cells per 100 um^2)": values[i, j]
             })
 
     df = pd.DataFrame(rows)
@@ -445,16 +452,17 @@ def save_grid(x_edges, y_edges, values, out_path):
     extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
 
     plt.imshow(
-        df['density'].to_numpy().reshape((len(x_edges) - 1, len(y_edges) - 1)),
-        origin='lower',
+        df['Density (cells per 100 um^2)'].to_numpy().reshape((len(x_edges) - 1, len(y_edges) - 1)),
+        origin='upper',
         extent=extent,
-        aspect='auto'
+        aspect='equal',
+        cmap='jet'
     )
 
-    plt.colorbar(label="Density")
-    plt.xlabel("X")
-    plt.ylabel("Y")
-    plt.title("Density heatmap")
+    plt.colorbar(label=r"Density (cells per 100 $\mu m^2$)")
+    plt.xlabel(r"$X \ (\mu m)$")
+    plt.ylabel(r"$Y \ (\mu m)$")
+    plt.title("CXCL12 cell density heatmap")
 
     plt.savefig('images' + out_path[4:-4] + '.png', dpi=300, bbox_inches='tight')
     plt.close()
@@ -464,8 +472,9 @@ def analyse_files(target_directory):
     for file in target_directory.files:
         if file.type == 'csv' and 'analysed' not in file.path:
             df = pd.read_csv(file.path)
-            df.index = df[' ']
-            df.drop(columns=[' '], inplace=True)
+            if ' ' in df.columns:
+                df.index = df[' ']
+                df.drop(columns=[' '], inplace=True)
 
             coords = df[['X', 'Y']].values
             tree = cKDTree(coords)
@@ -485,7 +494,7 @@ def analyse_files(target_directory):
             df['5 nearest neighbour IDs'] = list(indices)
             df['Mean distance to 2 nearest neighbours'] = dists[:,0:2].mean(axis=1)
             df['Mean distance to 5 nearest neighbours'] = dists.mean(axis=1)
-            df['Density based on 5nn'] = 1/df['Mean distance to 5 nearest neighbours']
+            df['Local density (cells / 100 um^2)'] = 1/df['Mean distance to 5 nearest neighbours']
 
             # # Global mean
             # global_mean_2nn = df['Mean distance to 2 nearest neighbours'].mean()
@@ -494,7 +503,7 @@ def analyse_files(target_directory):
             # Optional: mean pairwise distance (vectorised)
             diff = coords[:, None, :] - coords[None, :, :]
             pairwise_dists = np.sqrt((diff ** 2).sum(axis=2))
-            min_dist = pairwise_dists.min()
+            min_dist = 15 # diameter of stromal cell is roughly 15 um
             mean_pairwise = pairwise_dists.sum(axis=1) / (len(df) - 1)
             std_pairwise = None
             df['Mean pairwise distance'] = mean_pairwise
@@ -507,7 +516,8 @@ def analyse_files(target_directory):
                 points,
                 n_sim=30,
                 k=2,
-                buffer_radius=15.0,
+                buffer_radius=60.0, # Roughly 8x radius of stromal cell.
+                # This means there's a potentially much larger area for the CSR - extra unlikely to report significant dispersion
                 sep_min=min_dist,
                 fname=file.path
             )
@@ -522,10 +532,10 @@ def analyse_files(target_directory):
 
 
             # Heatmap of density
-            n_cells = 50  # 100x100 = 10,000 pixels
-            tol = 50.0      # tolerance radius (set None for raw counts)
+            target_n_cells = 200  # resulting map will have ~target_n_cells^2 pixels.
+            tol = 20.0   # neighbourhood radius to find cells in, must be set
 
-            x_edges, y_edges = make_grid(points, n_cells)
+            x_edges, y_edges = make_grid(points, target_n_cells, margin=20)
             centers, shape = grid_centers(x_edges, y_edges)
 
             if tol is None:
@@ -534,6 +544,7 @@ def analyse_files(target_directory):
                 counts = compute_density(points, centers, tol)
                 density = counts.reshape(shape)
 
+            # Pixelated heatmap of the density data from the original CSV
             save_grid(x_edges, y_edges, density, f"{file.path[:-4]}_analysed_density_map.csv")
 
 
@@ -580,6 +591,6 @@ def make_summary_table(target_directory):
 
 if __name__ == '__main__':
     target_directory = Folder('data')
-    # analyse_files(target_directory)
-    make_summary_table(target_directory)
+    analyse_files(target_directory)
+    # make_summary_table(target_directory)
 

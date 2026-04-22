@@ -181,6 +181,19 @@ def plotly_2lines(df1, x1, y1, df2, x2, y2, colours=('red', 'blue')):
 
 
 #%%
+def plotly_boxplot(data_dict, y_name):
+	'''
+	Specify category name for x axis as key to df_dict, with array of y as corresponding value
+	'''
+	pass
+
+
+#%%
+def plotly_cdf_curve(df, x, cmap):
+	pass
+
+
+#%%
 def demo_plot(df, x, y, c, lookup_df, colourscheme='Viridis'):
 	'''
 	Plot scatterpoints on a graph for x and y, color points by c and show how close they are to the ground truth
