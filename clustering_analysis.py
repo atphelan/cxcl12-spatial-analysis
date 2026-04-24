@@ -1,4 +1,5 @@
 from utils import Folder
+import os
 
 import pandas as pd
 # import json
@@ -101,7 +102,7 @@ def local_clustering_significance(points, r, n_sim=100):
 
     return observed, z, p
 
-def ripley_k_l(points, radii, area, tree=None, edge_correction=True):
+def ripley_k_l(points, radii, area, tree=None, edge_correction=True, intensity=None):
     """
     Compute Ripley's K and L functions.
 
@@ -116,7 +117,8 @@ def ripley_k_l(points, radii, area, tree=None, edge_correction=True):
         K (ndarray), L (ndarray)
     """
     n = len(points)
-    intensity = n / area  # lambda
+    if intensity is None:
+        intensity = n / area  # lambda
 
     if tree is None:
         tree = cKDTree(points)
@@ -162,6 +164,9 @@ def compute_area(points):
     xmin, ymin = points.min(axis=0)
     xmax, ymax = points.max(axis=0)
     return (xmax - xmin) * (ymax - ymin)
+
+def compute_area_mask(points, buffer_radius):
+    return build_mask(points, buffer_radius = buffer_radius).area
 
 # -------------------------
 # Load data
@@ -464,7 +469,7 @@ def save_grid(x_edges, y_edges, values, out_path):
     plt.ylabel(r"$Y \ (\mu m)$")
     plt.title("CXCL12 cell density heatmap")
 
-    plt.savefig('images' + out_path[4:-4] + '.png', dpi=300, bbox_inches='tight')
+    plt.savefig('images for album' + out_path[4:-4] + '.png', dpi=300, bbox_inches='tight')
     plt.close()
 
 
@@ -532,7 +537,7 @@ def analyse_files(target_directory):
 
 
             # Heatmap of density
-            target_n_cells = 200  # resulting map will have ~target_n_cells^2 pixels.
+            target_n_cells = 300  # resulting map will have ~target_n_cells^2 pixels.
             tol = 20.0   # neighbourhood radius to find cells in, must be set
 
             x_edges, y_edges = make_grid(points, target_n_cells, margin=20)
@@ -550,6 +555,11 @@ def analyse_files(target_directory):
 
 def make_summary_table(target_directory):
     data_dict_list = []
+    if os.path.exists('analysed_data_summary.csv'):
+        mean_density = pd.read_csv('analysed_data_summary.csv')['Mean 2nn distance'].mean()
+        mean_density = 100*2/(np.pi*mean_density**2) # Estimate of local density in units of per 100 um^2
+    else:
+        mean_density = 0.1
     for file in target_directory.files:
         if file.type == 'csv' and 'analysed.' in file.path:
             df = pd.read_csv(file.path)
@@ -562,24 +572,25 @@ def make_summary_table(target_directory):
             # Clark-Evans index analysis of clustering
             # -------------------------
 
-            points = load_points(file.path)
-            results = analyze_clark_evans(points, n_regions=3)
+            # points = load_points(file.path)
+            # results = analyze_clark_evans(points, n_regions=3)
 
-            print("\nOverall Clark-Evans:")
-            print(results["overall"])
-            data_dict_list[-1].update({'Overall Clark-Evans': results['overall']})
+            # print("\nOverall Clark-Evans:")
+            # print(results["overall"])
+            # data_dict_list[-1].update({'Overall Clark-Evans': results['overall']})
 
-            print("\nRegions:")
-            for r in results["regions"]:
-                print(r)
-                data_dict_list[-1].update({f'Region {r["region"]} Clark-Evans': r['R'], f'Region {r["region"]} density': 1/r['r_obs'], f'Number of points in region {r["region"]}': r['n_points']})
+            # print("\nRegions:")
+            # for r in results["regions"]:
+            #     print(r)
+            #     data_dict_list[-1].update({f'Region {r["region"]} Clark-Evans': r['R'], f'Region {r["region"]} density': 1/r['r_obs'], f'Number of points in region {r["region"]}': r['n_points']})
             
+
+            # Analysis of density heatmap data
+
             density_data = pd.read_csv(file.path[:-12] + 'analysed_density_map.csv')
             
-            density_data['density class'] = density_data['density'] < 1E-8
-            density_data = density_data.loc[~density_data['density class']]
-            mean_density = 10 #density_data['density'].mean() # Seems to be a good middling density to divide regions at
-            density_data['density class'] = density_data['density'] > mean_density # WILL ALWAYS GIVE 50:50 if you compare to mean!
+            density_data = density_data.loc[density_data['Density (cells per 100 um^2)'] > 1E-8]
+            density_data['density class'] = density_data['Density (cells per 100 um^2)'] > mean_density # Mean drawn from samples across different bones
 
             data_dict_list[-1].update({'Percentage coverage high density pixels': round(100*density_data['density class'].mean(), 1)})
             
@@ -592,5 +603,5 @@ def make_summary_table(target_directory):
 if __name__ == '__main__':
     target_directory = Folder('data')
     analyse_files(target_directory)
-    # make_summary_table(target_directory)
+    make_summary_table(target_directory)
 
