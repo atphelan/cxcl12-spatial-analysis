@@ -6,12 +6,16 @@ import pandas as pd
 # import operator
 import numpy as np
 from scipy.spatial import cKDTree
+from scipy.stats import f_oneway, ttest_ind
+from scipy.interpolate import griddata as interp_grid
 from shapely.geometry import Point
 from shapely.ops import unary_union
 from sklearn.cluster import KMeans
 import random
 
 import matplotlib.pyplot as plt
+from matplotlib import cm
+import copy
 
 def morans_i(x, y, values):
     """
@@ -234,7 +238,7 @@ def sample_points_in_region(region, n_points, sep_min, max_attempts=100000):
 # -------------------------
 # Run CSR simulation
 # -------------------------
-def csr_simulation(points, n_sim=10, k=5, buffer_radius=15.0, sep_min=0, fname=None):
+def csr_simulation(points, n_sim=10, k=5, buffer_radius=15.0, sep_min=0, fname='testname'):
     n = len(points)
 
     # observed statistic
@@ -409,13 +413,20 @@ def grid_centers(x_edges, y_edges):
 # -------------------------
 # Density calculation
 # -------------------------
-def compute_density(points, centers, tol):
+def compute_density(points, centers, tol, edge_tol):
     tree = cKDTree(points)
     # count points within radius tol of each pixel center
     counts = []
     for c in centers:
-        neighbors = tree.query_ball_point(c, tol)
-        counts.append(len(neighbors)/(np.pi*tol**2/100))
+        neighbours = tree.query_ball_point(c, tol)
+        if len(neighbours)==0:
+            neighbours = tree.query_ball_point(c, edge_tol)
+            if len(neighbours)==0:
+                counts.append(np.nan)
+            else:
+                counts.append(0.0)
+        else:
+            counts.append(len(neighbours)/(np.pi*tol**2/100))
 
     return np.array(counts)
 
@@ -454,14 +465,20 @@ def save_grid(x_edges, y_edges, values, out_path):
     plt.figure()
 
     # extent ensures axes match real coordinates
-    extent = [x_edges[0], x_edges[-1], y_edges[0], y_edges[-1]]
+    extent = (x_edges[0], x_edges[-1], y_edges[0], y_edges[-1])
 
+    a = df['Density (cells per 100 um^2)'].to_numpy().reshape((len(x_edges) - 1, len(y_edges) - 1))
+    
+    masked_a = np.ma.array(a, mask=np.isnan(a))
+    cmap = copy.copy(cm.jet)
+    cmap.set_bad('white',1.)
     plt.imshow(
-        df['Density (cells per 100 um^2)'].to_numpy().reshape((len(x_edges) - 1, len(y_edges) - 1)),
+        masked_a,
         origin='upper',
         extent=extent,
         aspect='equal',
-        cmap='jet'
+        cmap=cmap,
+        interpolation='nearest',
     )
 
     plt.colorbar(label=r"Density (cells per 100 $\mu m^2$)")
@@ -475,7 +492,7 @@ def save_grid(x_edges, y_edges, values, out_path):
 
 def analyse_files(target_directory):
     for file in target_directory.files:
-        if file.type == 'csv' and 'analysed' not in file.path:
+        if (file.type == 'csv' and 'analysed' not in file.path) and ('Slide' in file.path and 'duplicates_removed' in file.path):
             df = pd.read_csv(file.path)
             if ' ' in df.columns:
                 df.index = df[' ']
@@ -538,7 +555,8 @@ def analyse_files(target_directory):
 
             # Heatmap of density
             target_n_cells = 300  # resulting map will have ~target_n_cells^2 pixels.
-            tol = 20.0   # neighbourhood radius to find cells in, must be set
+            tol = 10.0   # neighbourhood radius to find cells in, must be set
+            tissue_edge_tol = 60.0 # Mark anything further away from a cell than this as NaN
 
             x_edges, y_edges = make_grid(points, target_n_cells, margin=20)
             centers, shape = grid_centers(x_edges, y_edges)
@@ -546,7 +564,9 @@ def analyse_files(target_directory):
             if tol is None:
                 density = compute_counts_hist(points, x_edges, y_edges)
             else:
-                counts = compute_density(points, centers, tol)
+                counts = compute_density(points, centers, tol, tissue_edge_tol)
+                # if len(counts)//target_n_cells != target_n_cells:
+                #     pass
                 density = counts.reshape(shape)
 
             # Pixelated heatmap of the density data from the original CSV
@@ -555,14 +575,16 @@ def analyse_files(target_directory):
 
 def make_summary_table(target_directory):
     data_dict_list = []
+    anova_data = []
     if os.path.exists('analysed_data_summary.csv'):
-        mean_density = pd.read_csv('analysed_data_summary.csv')['Mean 2nn distance'].mean()
-        mean_density = 100*2/(np.pi*mean_density**2) # Estimate of local density in units of per 100 um^2
+        threshold_density = pd.read_csv('analysed_data_summary.csv')['Mean 2nn distance'].mean()
+        threshold_density = 3*100*2/(np.pi*threshold_density**2)
     else:
-        mean_density = 0.1
+        threshold_density = 0.3
     for file in target_directory.files:
-        if file.type == 'csv' and 'analysed.' in file.path:
+        if (file.type == 'csv' and 'analysed' in file.path) and ('Slide' in file.path and 'duplicates_removed' in file.path) and not 'density_map' in file.path:
             df = pd.read_csv(file.path)
+            anova_data.append((5/df['Mean distance to 5 nearest neighbours']).to_list())
             global_mean_2nn = round(df['Mean distance to 2 nearest neighbours'].mean(),2)
             global_mean_5nn = round(df['Mean distance to 5 nearest neighbours'].mean(),2)
             # data_dict.update({file.name[:-4]: global_mean_5nn})
@@ -590,13 +612,22 @@ def make_summary_table(target_directory):
             density_data = pd.read_csv(file.path[:-12] + 'analysed_density_map.csv')
             
             density_data = density_data.loc[density_data['Density (cells per 100 um^2)'] > 1E-8]
-            density_data['density class'] = density_data['Density (cells per 100 um^2)'] > mean_density # Mean drawn from samples across different bones
+            density_data['density class'] = density_data['Density (cells per 100 um^2)'] > threshold_density # 2xMean drawn from samples across different bones
 
             data_dict_list[-1].update({'Percentage coverage high density pixels': round(100*density_data['density class'].mean(), 1)})
             
     # sorted_dict = dict(sorted(data_dict.items(), key=operator.itemgetter(0)))
     # with open('analysed_data_summary.json', 'w') as f:
     #     json.dump(sorted_dict, f)
+    f_stat, p_val = f_oneway(*anova_data)
+    t_test_list = []
+    for i in range(1,9):
+        for j in range(1,9):
+            if j>i:
+                tt_res = ttest_ind(anova_data[i-1], anova_data[j-1])
+                t_test_list.append({'Slides compared': f'{i} and {j}', 't': tt_res.statistic, 'p': tt_res.pvalue})
+    t_test_list.append({'Slides compared': 'All', 'f': f_stat, 'p': p_val})
+    pd.DataFrame(t_test_list).to_csv('analysed_data_tests.csv')
     pd.DataFrame(data_dict_list).sort_values('name').to_csv('analysed_data_summary.csv')
 
 
