@@ -260,8 +260,10 @@ def plotly_2lines(df1, x1, y1, df2, x2, y2, colours=('red', 'blue')):
 
 	return fig
 
+cs = ['cornflowerblue', 'darkgreen', 'indianred']
+colours_lookup = {1:cs[0], 2:cs[2], 3:cs[1], 4:cs[0], 5:cs[2], 6:cs[2], 7:cs[1], 8:cs[0]}
 colours_list = ['cornflowerblue', 'crimson', 'darkgreen', 'deepskyblue', 'darkred', 'indianred', 'green', 'mediumslateblue']
-slide_colours = {f'Slide {n}': colours_list[n-1] for n in range(1, 9)}
+slide_colours = {f'Slide {n}': colours_lookup[n] for n in range(1, 9)}
 
 #%%
 def plotly_boxplot(data_dict, y_name):
@@ -552,10 +554,10 @@ if __name__ == '__main__':
 	# df = pd.read_csv('data/CS_CX_HLF_12h_Femur_M4_annotations_measure_final_analysed.csv')
 	data_dict = {}
 	for file in Folder('data').files:
-		if ('analysed' in file.name and not 'density' in file.name) and 'Slide' in file.name:
+		if ('analysed' in file.name and not 'density' in file.name) and ('Slide' in file.name and 'duplicates' in file.name):
 			df = file.read()
-			fname = file.name.split('_analysed')[0]
-			# data_dict.update({fname: df.copy()})
+			fname = file.name.split('_duplicates')[0]
+			data_dict.update({fname: df.copy()})
 
 			# fig = plotly_scatter(df, 'X', 'Y', 'Mean distance to 5 nearest neighbours', title=file.name.split('_analysed')[0])
 			# fig.write_image('images/' + file.name[:-4] + 'scatter.png')

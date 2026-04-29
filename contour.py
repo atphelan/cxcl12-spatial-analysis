@@ -117,7 +117,7 @@ def scatter(csv_path, out_plot):
 if __name__ == '__main__':
 	target_directory = Folder('data')
 	for file in Folder('data').files:
-		if ('analysed' in file.name and not 'density' in file.name) and 'Slide' in file.name:
+		if ('analysed' in file.name and not 'density' in file.name) and ('Slide' in file.name and 'duplicates' in file.name):
 			df = file.read()
 			contour_density_from_points(
 				file.path,

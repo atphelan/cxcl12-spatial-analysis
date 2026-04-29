@@ -262,7 +262,7 @@ def csr_simulation(points, n_sim=10, k=5, buffer_radius=15.0, sep_min=0, fname='
     plt.xlabel(r"$X \ (\mu m)$")
     plt.ylabel(r"$Y \ (\mu m)$")
     plt.axis("equal")
-    plt.savefig(fname[:-4] + '_simulated.png')
+    plt.savefig('images' + fname[4:-4] + '_simulated.png')
     plt.close()
 
     # standardization
@@ -578,7 +578,7 @@ def make_summary_table(target_directory):
     anova_data = []
     if os.path.exists('analysed_data_summary.csv'):
         threshold_density = pd.read_csv('analysed_data_summary.csv')['Mean 2nn distance'].mean()
-        threshold_density = 3*100*2/(np.pi*threshold_density**2)
+        threshold_density = 4*2*100/(2*np.pi*threshold_density**2)
     else:
         threshold_density = 0.3
     for file in target_directory.files:
@@ -587,7 +587,6 @@ def make_summary_table(target_directory):
             anova_data.append((5/df['Mean distance to 5 nearest neighbours']).to_list())
             global_mean_2nn = round(df['Mean distance to 2 nearest neighbours'].mean(),2)
             global_mean_5nn = round(df['Mean distance to 5 nearest neighbours'].mean(),2)
-            # data_dict.update({file.name[:-4]: global_mean_5nn})
             data_dict_list.append({'name': file.name.split('annotation')[0][:-1] + ('_' + file.name[-14] if str.isdigit(file.name[-14]) else ''), 'Mean 2nn distance': global_mean_2nn, 'Mean 5nn distance': global_mean_5nn})
     
             # -------------------------
@@ -633,6 +632,6 @@ def make_summary_table(target_directory):
 
 if __name__ == '__main__':
     target_directory = Folder('data')
-    analyse_files(target_directory)
+    # analyse_files(target_directory)
     make_summary_table(target_directory)
 
