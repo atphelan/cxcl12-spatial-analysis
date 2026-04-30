@@ -342,8 +342,9 @@ def plotly_cdf_curve(df, x, cmap, title=None):
 	if x in renaming.keys():
 		x = renaming[x]
 	df['CDF'] = df.index/len(df)
-	if df[x].max() < 0.35:
-		df = pd.concat([df, pd.DataFrame({x: np.linspace(df[x].max(), 0.35, 10), 'CDF': np.ones(10)})])
+	max_x = 0.18
+	if df[x].max() < max_x:
+		df = pd.concat([df, pd.DataFrame({x: np.linspace(df[x].max(), max_x, 10), 'CDF': np.ones(10)})])
 
 	return plotly_line(df, x, 'CDF', title=title, linewidth=4, fillcolour=slide_colours[title[:7]])
 
