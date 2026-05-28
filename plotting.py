@@ -265,31 +265,37 @@ colours_lookup = {1:cs[0], 2:cs[2], 3:cs[1], 4:cs[0], 5:cs[2], 6:cs[2], 7:cs[1],
 colours_list = ['cornflowerblue', 'crimson', 'darkgreen', 'deepskyblue', 'darkred', 'indianred', 'green', 'mediumslateblue']
 slide_colours = {f'Slide {n}': colours_lookup[n] for n in range(1, 9)}
 
+
 #%%
-def plotly_boxplot(data_dict, y_name):
+def plotly_boxplot(data_dict, y_name, legend=False):
 	'''
 	Specify category name for x axis as key to df_dict, with array of y as corresponding value
 	'''
 	fig = go.Figure(layout=go.Layout(plot_bgcolor='white'))
-	full_name_lookup = {k[:7] : k for k in data_dict.keys()}
 	for k, df in data_dict.items():
 		fig.add_trace(go.Box(
 			y=df[y_name],
 			quartilemethod='inclusive',
 			name=k,
-			marker_color=slide_colours[k[:7]]
+			# marker_color=slide_colours[k[:7]]
 		))
 
+	if legend:
+		full_name_lookup = {k[:7] : k for k in data_dict.keys()}
+	else:
+		fig.update_layout(showlegend=False)
+
 	fig.update_layout(
-		xaxis=dict(ticks='', showgrid=False, zeroline=False, nticks=12),
-		yaxis=dict(ticks='', showgrid=False, zeroline=False, nticks=12),
-		yaxis_title=dict(text=r'$\text{Local density (cells / 100 }\mu m^2\text{)}$', font=dict(size=24)),
+		# xaxis=dict(ticks='', showgrid=False, zeroline=False, nticks=12),
+		# yaxis=dict(ticks='', showgrid=False, zeroline=False, nticks=12),
+		yaxis_title=dict(text=y_name, font=dict(size=24)),
+		# yaxis_title=dict(text=r'$\text{Local density (cells / 100 }\mu m^2\text{)}$', font=dict(size=24)),
 		# autosize=False,
-		# height=400,
-		# width=500,
+		height=800,
+		width=800,
 		# margin=dict(l=0, r=0, t=60, b=0),
 		# hovermode='closest',
-		# font=dict(size=18),
+		font=dict(size=26),
 		# boxmode='group',
 		# showlegend=False,
 	)
@@ -323,13 +329,14 @@ def plotly_boxplot(data_dict, y_name):
 		# range=[0.0, 9.5],
 	)
 
-	fig.update_layout(
-		xaxis=dict(
-			tickmode="array",
-			tickvals=list(full_name_lookup.values()),
-			ticktext=list(full_name_lookup.keys())
+	if legend:
+		fig.update_layout(
+			xaxis=dict(
+				tickmode="array",
+				tickvals=list(full_name_lookup.values()),
+				ticktext=list(full_name_lookup.keys())
+			)
 		)
-	)
 
 	return fig
 
@@ -549,6 +556,11 @@ def histplot(df, x, ref_mu, ref_sigma, bins=10, title=None):
 	ax.set_ylabel('Frequency')
 	ax.set_title(title)
 	return ax
+
+def hole_plots_and_stats():
+	df['Mouse number'] = df['name'].apply(lambda s: ('2' if 'M2' in s else '4' if 'M4' in s else '5' if 'M5' in s else '2'))
+	df['Bone type'] = df['name'].apply(lambda s: ('Hip' if 'Hip' in s else 'Femur' if 'Fem' in s else 'ThV'))
+	# Some MANOVA for bone type + mouse number affecting any CXCL12/hole density/count?
 
 #%%
 if __name__ == '__main__':
