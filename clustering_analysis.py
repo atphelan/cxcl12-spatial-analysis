@@ -582,7 +582,7 @@ def make_summary_table(target_directory):
     else:
         threshold_density = 0.3
     for file in target_directory.files:
-        if (file.type == 'csv' and 'analysed' in file.path) and ('Slide' in file.path and 'duplicates_removed' in file.path) and not 'density_map' in file.path:
+        if (file.type == 'csv' and 'analysed' in file.path) and not 'dilate' in file.name:
             df = pd.read_csv(file.path)
             anova_data.append((5/df['Mean distance to 5 nearest neighbours']).to_list())
             global_mean_2nn = round(df['Mean distance to 2 nearest neighbours'].mean(),2)
@@ -630,8 +630,41 @@ def make_summary_table(target_directory):
     pd.DataFrame(data_dict_list).sort_values('name').to_csv('analysed_data_summary.csv')
 
 
+def make_summary_table_10images(target_directory):
+    data_dict_list = []
+    anova_data = {}
+    anova_variable = 'hole_coverage'
+    for file in target_directory.files:
+        if (file.type == 'csv' and 'analysed' in file.path) and not 'dilate' in file.name:
+            df = pd.read_csv(file.path)
+            anova_data.update({file.name.split('_bin')[0]: (df[anova_variable]).to_list()})
+            data_dict_list.append({k: round(df[k].mean(), 6) for k in ['n_holes', 'hole_density', 'hole_area', 'hole_coverage', 'filled_area', 'n_cells', 'cell_density']})
+            data_dict_list[-1].update({'name': file.name.split('_bin')[0]})
+            
+    f_stat, p_val = f_oneway(*[a for a in anova_data.values()])
+    t_test_list = []
+
+    # for i, ki in enumerate(anova_data.keys()):
+    #     for j, kj in enumerate(anova_data.keys()):
+    #         if j>i:
+    #             tt_res = ttest_ind(anova_data[ki], anova_data[kj])
+    #             t_test_list.append({'Slides compared': f'{ki} and {kj}', 't': tt_res.statistic, 'p': tt_res.pvalue})
+    # t_test_list.append({'Slides compared': 'All', 'f': f_stat, 'p': p_val})
+
+    for ki in anova_data.keys():
+        if 'hip' in ki:
+            kj = ki.split('_')[0].replace('hip', 'femur')
+            tt_res = ttest_ind(anova_data[ki], anova_data[kj])
+            t_test_list.append({'Slides compared': f'{ki} and {kj}', 't': tt_res.statistic, 'p': tt_res.pvalue})
+    t_test_list.append({'Slides compared': 'All', 'f': f_stat, 'p': p_val})
+
+    pd.DataFrame(t_test_list).to_csv(f'analysed_data_tests_{anova_variable}.csv')
+    pd.DataFrame(data_dict_list).sort_values('name').to_csv('analysed_data_summary.csv')
+
+
+
 if __name__ == '__main__':
-    target_directory = Folder('data')
+    target_directory = Folder('mask tif files from Clara')
     # analyse_files(target_directory)
-    make_summary_table(target_directory)
+    make_summary_table_10images(target_directory)
 

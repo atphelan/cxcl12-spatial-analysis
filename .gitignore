@@ -213,3 +213,4 @@ Particle_Data/*
 Dilated_Masks/*
 *.tif
 .DS_store
+*.zip
