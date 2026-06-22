@@ -1,29 +1,19 @@
-import os
 import numpy as np
 import pandas as pd
-import matplotlib
-# matplotlib.use('Agg')
-import matplotlib.pyplot as plt; import matplotlib.cm as cm; import matplotlib.ticker as ticker
-import copy
+import matplotlib 
+matplotlib.use('Agg')
+from matplotlib import pyplot as plt, cm, ticker, colors
 from scipy.spatial import cKDTree
-from skimage.segmentation import flood, flood_fill
+from scipy.ndimage import label, convolve
 from skimage import io
 from skimage.draw import line
-
-
-from scipy.ndimage import label, convolve, distance_transform_edt
-from skimage.morphology import (
-    binary_dilation,
-    remove_small_objects,
-    disk,
-    binary_closing
-)
-
+from skimage.morphology import binary_dilation, disk
+import copy
 
 from utils import Folder
 from typing import Tuple
 
-def sample_windows(a, window_size, n_samples, allow_overlap=True, seed=None):
+def sample_windows(a, window_size, n_samples, window_ids=None, allow_overlap=True, seed=None):
     """
     Generate random sampling windows.
 
@@ -38,6 +28,9 @@ def sample_windows(a, window_size, n_samples, allow_overlap=True, seed=None):
     n_samples : int
         Number of random samples.
 
+    window_ids : List(int)
+        List of numbers to label windows with.
+
     allow_overlap : bool
         Whether windows may overlap.
 
@@ -50,6 +43,10 @@ def sample_windows(a, window_size, n_samples, allow_overlap=True, seed=None):
         List of tuples:
         (sample_id, y0, y1, x0, x1)
     """
+    if window_ids is None:
+        window_ids = list(range(1,n_samples+1))
+    elif len(window_ids) < n_samples:
+        n_samples = len(window_ids)
 
     rng = np.random.default_rng(seed)
 
@@ -92,13 +89,12 @@ def sample_windows(a, window_size, n_samples, allow_overlap=True, seed=None):
             occupied.append((y0, y1, x0, x1))
 
         windows.append(
-            (len(windows), y0, y1, x0, x1)
+            (window_ids.pop(), y0, y1, x0, x1)
         )
 
         attempts += 1
 
     return windows
-
 
 def connect_cells_to_neighbours(
     seed_mask: np.ndarray,
@@ -184,180 +180,6 @@ def connect_cells_to_neighbours(
 
     return graph_mask
 
-
-def compute_cell_density(
-    a: np.ndarray,
-    pixel_area: float = 1.0,
-    min_seed_pixels: int = 5,
-    locale_radius: int = 8,
-    dilation_radius: int = 20,
-    min_cell_size: int = 10
-):
-    """
-    Reconstruct biologically plausible GFP-positive tissue
-    from sparse/disconnected binary GFP signal.
-
-    IMPORTANT:
-        Assumes:
-            0 = GFP-positive
-            1 = background
-
-    Steps:
-    -------
-    1. Extract GFP-positive pixels
-    2. Remove isolated sparse pixels
-    3. Generate effective tissue mask by dilation
-    4. Compute connected-cell density inside tissue
-
-    Parameters
-    ----------
-    a : np.ndarray
-        Binary image.
-
-    pixel_area : float
-        Area represented by one pixel.
-
-    min_seed_pixels : int
-        Minimum neighbouring GFP pixels required locally.
-
-    locale_radius : int
-        Radius used to determine whether a pixel belongs
-        to a real cell body.
-
-    dilation_radius : int
-        Radius for tissue reconstruction.
-
-    min_cell_size : int
-        Minimum connected component size after reconstruction.
-
-    Returns
-    -------
-    dict
-    """
-
-    # --------------------------------------------------------
-    # GFP-positive pixels
-    # --------------------------------------------------------
-
-    gfp = (a == 0)
-
-    coords = np.column_stack(np.where(gfp))
-
-    if len(coords) == 0:
-
-        return {
-            "n_cells": 0,
-            "cell_density": np.nan,
-            "mean_cell_area": np.nan,
-            "tissue_mask": np.zeros_like(a, dtype=bool)
-        }
-
-    # --------------------------------------------------------
-    # Remove isolated pixels using local neighbour count
-    # --------------------------------------------------------
-
-    tree = cKDTree(coords)
-
-    keep = np.zeros(len(coords), dtype=bool)
-
-    for i, pt in enumerate(coords):
-
-        neighbours = tree.query_ball_point(pt, r=locale_radius)
-
-        if len(neighbours) >= min_seed_pixels:
-            keep[i] = True
-
-    filtered_coords = coords[keep]
-
-    seed_mask = np.zeros_like(a, dtype=bool)
-
-    seed_mask[
-        filtered_coords[:, 0],
-        filtered_coords[:, 1]
-    ] = True
-
-    # --------------------------------------------------------
-    # Remove tiny connected components
-    # --------------------------------------------------------
-
-    seed_mask = remove_small_objects(
-        seed_mask,
-        min_size=min_cell_size
-    )
-
-    # --------------------------------------------------------
-    # Reconstruct tissue occupancy field
-    # --------------------------------------------------------
-
-    tissue_mask = binary_dilation(
-        seed_mask,
-        disk(dilation_radius)
-    )
-
-    # --------------------------------------------------------
-    # Connected component analysis
-    # --------------------------------------------------------
-
-    labelled_cells, n_cells = label(seed_mask)
-
-    cell_sizes = np.bincount(labelled_cells.ravel())[1:]
-
-    valid_cells = cell_sizes >= min_cell_size
-
-    n_valid_cells = np.sum(valid_cells)
-
-    tissue_area = np.sum(tissue_mask) * pixel_area
-
-    density = (
-        n_valid_cells / tissue_area
-        if tissue_area > 0
-        else np.nan
-    )
-
-    mean_cell_area = (
-        np.mean(cell_sizes[valid_cells]) * pixel_area
-        if n_valid_cells > 0
-        else np.nan
-    )
-
-    return {
-        "n_cells": n_valid_cells,
-        "cell_density": density,
-        "mean_cell_area": mean_cell_area,
-        "tissue_area": tissue_area,
-        "tissue_mask": tissue_mask
-    }
-    
-def compute_hole_statistics(labelled_holes, pixel_area=1.0):
-
-    hole_sizes = np.bincount(labelled_holes.ravel())[1:]
-
-    if len(hole_sizes) == 0:
-
-        return {
-            "mean_hole_area": 0,
-            "largest_hole_area": 0,
-            "std_hole_area": 0,
-            "cv_hole_area": np.nan
-        }
-
-    hole_sizes = hole_sizes * pixel_area
-
-    mean_area = np.mean(hole_sizes)
-    std_area = np.std(hole_sizes)
-
-    return {
-        "mean_hole_area": mean_area,
-        "largest_hole_area": np.max(hole_sizes),
-        "std_hole_area": std_area,
-        "cv_hole_area": (
-            std_area / mean_area
-            if mean_area > 0
-            else np.nan
-        )
-    }
-
-
 def hole_density_from_array_extended(
     a: np.ndarray, # Binary file of an image, normalisation not necessary. Everything nonzero is converted to 1.
     name: str, # Base name to save troubleshooting images and final CSV data with
@@ -373,12 +195,14 @@ def hole_density_from_array_extended(
     network_dilation_radius: float = 5,
 
     # For sampling - don't sample largely empty windows
-    min_gfp_pixels: int = int(5E4), # For whole image. Prevents being too close to an edge.
+    min_tissue_area_frac: float = 0.4, # Skips if region is too empty, useful when sampling.
 
     # object filtering
-    min_hole_size: int = 10, # Don't count holes below this number of pixels towards the total count
+    min_hole_area: float = 1000, # Don't count holes below this number of pixels towards the total count
+    max_hole_area: float = 1E5,
+    
     min_cell_size: float = 10, # Distance to dilate background by. Min surviving cell size is essentially 2x this
-    min_cell_radius: float = 5,
+    min_cell_radius: float = 3,
 
     image_folder: str = 'troubleshoot_images',
     resolution: float = 1.0, # Convert micrometre lengths to pixels
@@ -406,20 +230,10 @@ def hole_density_from_array_extended(
     -------
     dict
     """
-    # Normalising all length parameters to the resolution
+    # Normalising all length parameters to the resolution, from um to px
     cell_dilation_radius = cell_dilation_radius * resolution
     network_dilation_radius = network_dilation_radius * resolution
     min_cell_radius = min_cell_radius * resolution
-
-
-    # ========================================================
-    # PIXEL SCALING
-    # ========================================================
-
-    dx = (xrange[1] - xrange[0]) / a.shape[1]
-    dy = (yrange[1] - yrange[0]) / a.shape[0]
-
-    pixel_area = dx * dy
 
     blank_output = {
             "name": name,
@@ -437,18 +251,43 @@ def hole_density_from_array_extended(
             "mean_cell_area": np.nan
         }
 
+    if mode == 'windows':
+        tissue_mask = io.imread(f"final tif files/{name.split('/')[-1].split('_sample')[0]}_roi.tif")
+        tissue_mask = tissue_mask[yrange[0]:yrange[1]].T[xrange[0]:xrange[1]].T.astype(bool) # This has to be in pixels
+        if (~tissue_mask).sum()/np.prod(tissue_mask.shape) < min_tissue_area_frac:
+            return blank_output
+        fig, ax = plt.subplots()
+        ax.imshow(~tissue_mask, cmap='binary')
+        ax.set_title(f'{name} annotated tissue mask')
+        ax.set_xlabel('X / um')
+        ax.set_ylabel('Y / um')
+
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{x / resolution:.2f}'))
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{y / resolution:.2f}'))
+
+        plt.savefig(f'{image_folder}/' + name + f'_tissue_mask_segment.png', bbox_inches='tight')
+        plt.close(fig)
+    else:
+        tissue_mask = io.imread(f"final tif files/{name.split('/')[-1][:-4]}_roi.tif").astype(bool)
+
+    # ========================================================
+    # PIXEL SCALING
+    # ========================================================
+
+    # dx = (xrange[1] - xrange[0]) / a.shape[1]
+    # dy = (yrange[1] - yrange[0]) / a.shape[0]
+
+    # pixel_area = dx * dy
+
     # ========================================================
     # GFP-POSITIVE PIXELS
     # ========================================================
 
-    gfp = (a == 0)
-    if 1.0*(gfp.sum()) < (~gfp).sum(): # Consider boosting background weighting a little
-        gfp = ~gfp # Some files appear to be stored with GFP signal as >1 (255) and some as 0, annoyingly.
+    a = ~(a.astype(bool))
+    if 1.0*(a.sum()) < (~a).sum(): # Consider boosting background weighting a little
+        a = ~a # Some files appear to be stored with GFP signal as >1 (255) and some as 0, annoyingly.
 
-    if gfp.sum() < min_gfp_pixels:
-        return blank_output
-
-    coords = np.column_stack(np.where(gfp))
+    coords = np.column_stack(np.where(a))
 
     if len(coords) == 0:
         return blank_output
@@ -465,14 +304,14 @@ def hole_density_from_array_extended(
     )
 
     local_counts = convolve(
-        gfp.astype(np.uint8),
+        a.astype(np.uint8),
         kernel,
         mode="constant",
         cval=0
     )
 
     seed_mask = (
-        gfp &
+        a &
         (local_counts >= min_seed_pixels)
     )
 
@@ -495,11 +334,6 @@ def hole_density_from_array_extended(
     # REMOVE TINY CELL FRAGMENTS
     # ========================================================
 
-    # seed_mask = remove_small_objects(
-    #     seed_mask,
-    #     min_size=min_cell_size
-    # ) # Doesn't seem to do anything
-
     seed_mask = binary_dilation(
         seed_mask,
         disk(min_cell_radius//2)
@@ -514,7 +348,7 @@ def hole_density_from_array_extended(
     ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{x / resolution:.2f}'))
     ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{y / resolution:.2f}'))
 
-    plt.savefig(f'{image_folder}/' + name + f'_seed_mask_noiseless_{round(min_cell_radius/resolution,1)}.png', bbox_inches='tight')
+    plt.savefig(f'{image_folder}/' + name + f'_seed_mask_noiseless_{round(min_cell_radius,1)}.png', bbox_inches='tight')
     plt.close(fig)
 
 
@@ -540,14 +374,34 @@ def hole_density_from_array_extended(
     plt.close(fig)
 
     # ========================================================
+    # CELL STATISTICS AFTER EXPANDING CELLS
+    # ========================================================
+
+    labelled_cells, _ = label(~seed_mask)
+
+    cell_sizes = np.bincount(
+        labelled_cells.ravel()
+    )[1:]
+
+    valid_cells = cell_sizes >= min_cell_size
+
+    n_cells = np.sum(valid_cells)
+    if int(n_cells) < 50:
+        return blank_output
+
+    # ========================================================
     # Draw lines between cells and their 5 nearest neighbours
     # ========================================================
 
     seed_mask = connect_cells_to_neighbours(
         ~seed_mask,
-        k=10,
-        max_distance=400
+        k=12, # In a close-packed setting, this covers the closest two layers of cells
+        max_distance=150*resolution # Conversion from 100um to pixels
     )
+
+    # Remove connections which extend across holes in the tissue marked on the roi file
+    seed_mask = np.logical_and(seed_mask, ~tissue_mask)
+     
 
     seed_mask = ~(binary_dilation(
             seed_mask,
@@ -567,46 +421,9 @@ def hole_density_from_array_extended(
     plt.close(fig)
 
     # ========================================================
-    # CELL STATISTICS
-    # ========================================================
-
-    labelled_cells, _ = label(seed_mask)
-
-    cell_sizes = np.bincount(
-        labelled_cells.ravel()
-    )[1:]
-
-    valid_cells = cell_sizes >= min_cell_size
-
-    n_cells = np.sum(valid_cells)
-    if int(n_cells) < 50:
-        return blank_output
-
-    # ========================================================
     # RECONSTRUCT EFFECTIVE TISSUE
     # ========================================================
 
-    # tissue_mask = binary_dilation(
-    #     ~seed_mask,
-    #     disk(dilation_radius)
-    # ) # Binary dilation expands bright regions. i.e. 1s so we need to invert an image where the signal is 0
-    # Really slow when radius is large. Replacing with a distance calculation
-
-    # Distance to nearest GFP-positive seed
-    # dist = distance_transform_edt(seed_mask)
-
-    # Tissue occupancy field
-    # tissue_mask = dist <= dilation_radius
-
-    # tissue_mask = ~tissue_mask
-
-    # plt.imsave(f'{image_folder}/' + name + f'_tissue_mask_{dilation_radius}.png', tissue_mask)
-
-    if mode == 'windows':
-        tissue_mask = io.imread(f"final tif files/{name.split('/')[-1].split('_sample')[0]}_roi.tif")
-        tissue_mask = tissue_mask[yrange[0]:yrange[1]].T[xrange[0]:xrange[1]].T
-    else:
-        tissue_mask = io.imread(f"final tif files/{name.split('/')[-1][:-4]}_roi.tif")
     pixel_area = resolution**-2 # Square micrometres per pixel
 
     tissue_area = np.sum(tissue_mask) * pixel_area
@@ -627,31 +444,20 @@ def hole_density_from_array_extended(
     # HOLE DETECTION
     # ========================================================
 
-    # dist = distance_transform_edt(~seed_mask)
-    # holes_mask = dist <= network_dilation_radius
-
     labelled_holes, n_components = label(seed_mask)
 
-    # Reshuffle colours for visibility
-    shuffled = np.random.permutation(np.arange(1, n_components + 1))
+    # ========================================================
+    # COLOUR-CODED HOLE VISUALISATION
+    # ========================================================
 
-    # Prepend 0 so background (label 0) maps to 0
-    mapping = np.concatenate([[0], shuffled])
+    # --- Colour categories ---
+    # 0 : background / cells      → black
+    # 1 : valid hole              → green
+    # 2 : rejected, too small     → blue
+    # 3 : rejected, too large     → red
+    # 4 : rejected, touches edge  → grey
 
-    # --- Apply the mapping to the labelled array ---
-    shuffled_labels = mapping[labelled_holes]
-
-    fig, ax = plt.subplots()
-    ax.imshow(shuffled_labels, cmap='viridis')
-    ax.set_title(f'{name} identified holes')
-    ax.set_xlabel('X / um')
-    ax.set_ylabel('Y / um')
-
-    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{x / resolution:.2f}'))
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{y / resolution:.2f}'))
-
-    plt.savefig(f'{image_folder}/' + name + f'_labelled_holes_{min_hole_size}.png', bbox_inches='tight')
-    plt.close(fig)
+    colour_map = np.zeros(labelled_holes.shape, dtype=np.uint8)
 
     retained_holes = np.zeros_like(
         labelled_holes,
@@ -676,18 +482,50 @@ def hole_density_from_array_extended(
 
         n_pixels = component.sum()
 
-        if (
-            (not touches_edge and
-            n_pixels >= min_hole_size) and
-            n_pixels <= 1E5 # Max hole size to ignore background etc
-        ):
-
+        if touches_edge:
+            colour_map[component] = 4                      # grey  — edge-touching
+        elif n_pixels < min_hole_area * resolution**2:
+            colour_map[component] = 2                      # blue  — too small
+        elif n_pixels > max_hole_area * resolution**2:
+            colour_map[component] = 3                      # red   — too large
+        else:
+            colour_map[component] = 1                      # green — valid
             retained_holes[component] = current_label
-
             current_label += 1
-
             holes += 1
             hole_area_pixels += n_pixels
+
+    # --- Colourmap: black, green, blue, red, grey ---
+    cmap = colors.ListedColormap(
+        ['black', 'limegreen', 'steelblue', 'tomato', 'lightgrey']
+    )
+    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
+    norm = colors.BoundaryNorm(bounds, cmap.N)
+
+    fig, ax = plt.subplots()
+    im = ax.imshow(colour_map, cmap=cmap, norm=norm)
+
+    cbar = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3, 4])
+    cbar.ax.set_yticklabels([
+        'Background',
+        f'Valid',
+        f'Too small (<{min_hole_area} um^2)',
+        f'Too large (>{max_hole_area} um^2)',
+        'Touches edge'
+    ])
+
+    ax.set_title(f'{name} hole classification')
+    ax.set_xlabel('X / um')
+    ax.set_ylabel('Y / um')
+
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{x / resolution:.2f}'))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{y / resolution:.2f}'))
+
+    plt.savefig(
+        f'{image_folder}/' + name + f'_labelled_holes_{min_hole_area}.png',
+        bbox_inches='tight'
+    )
+    plt.close(fig)
 
     # ========================================================
     # HOLE STATISTICS
@@ -762,240 +600,11 @@ def hole_density_from_array_extended(
         # "seed_mask": seed_mask
     }
 
-def get_adjacent_indices(ij: Tuple[int, int], m: int, n: int):
-    adjacent_indices = []
-    if ij[0] > 0:
-        adjacent_indices.append((ij[0]-1,ij[1]))
-    if ij[0]+1 < m:
-        adjacent_indices.append((ij[0]+1,ij[1]))
-    if ij[1] > 0:
-        adjacent_indices.append((ij[0],ij[1]-1))
-    if ij[1]+1 < n:
-        adjacent_indices.append((ij[0],ij[1]+1))
-    return set(adjacent_indices)
-
-# def set_bg_to_nan(labelled):
-#     edge_points = {(0,0)}
-#     m, n = labelled.shape
-#     while len(edge_points) > 0:
-#         pt = edge_points.pop()
-#         if labelled[pt] == 1:
-#             labelled[pt] = 2
-#             edge_points = edge_points.union(get_adjacent_indices(pt, labelled.shape[0], labelled.shape[1]))
-#     return labelled
-
-def flood_fill_bg(a, old_val, new_val):
-    for pt in [(0,0), a.shape, (0,a.shape[1]), (a.shape[0],0)]:
-        if a[pt] == old_val:
-            filled_a = flood_fill(a, pt, new_val)
-            break
-    return filled_a
-
-
-def hole_density_from_array(a, name, xrange, yrange):
-    """
-    Computes:
-        (# of NaN holes inside region) / (area of region)
-    """
-
-    # -------------------------
-    # Masks
-    # -------------------------
-    iszero = a == 0
-    valid = ~iszero
-
-    # -------------------------
-    # Label NaN regions
-    # -------------------------
-    labelled, n_components = label(iszero)
-
-    holes = 0
-    hole_area = 0.0
-    # labelled = flood_fill_bg(labelled, 1, 2)
-
-    for i in range(1, n_components + 1):
-        component = (labelled == i)
-
-        # check if touches boundary
-        touches_edge = (
-            component[0, :].any() or
-            component[-1, :].any() or
-            component[:, 0].any() or
-            component[:, -1].any()
-        )
-
-        n_pixels = component.sum()
-
-        if not touches_edge and n_pixels > 10:
-            holes += 1
-            hole_area += n_pixels
-
-    # -------------------------
-    # Area of valid region
-    # -------------------------
-    # pixel area (assumes regular grid)
-    # x_vals = grid.columns.values
-    # y_vals = grid.index.values
-    dx, dy = (xrange[1]-xrange[0])/a.shape[0], (yrange[1]-yrange[0])/a.shape[1]  # Set scale based on input data in future
-
-    # dx = np.abs(x_vals[1] - x_vals[0])
-    # dy = np.abs(y_vals[1] - y_vals[0])
-    pixel_area_unit = dx * dy
-    # filled_area = np.sum(a)
-
-    filled_area = valid.sum() * pixel_area_unit
-    hole_area = hole_area * pixel_area_unit
-    hole_density = holes / filled_area if filled_area > 0 else np.nan
-
-    return {
-        "name": name,
-        "n_holes": holes,
-        "area": filled_area,
-        "hole_density": hole_density,
-        "hole_area": hole_area,
-        "hole_coverage": hole_area/(hole_area+filled_area)
-    }
-
-def make_grid(points, n_cells=100, margin=0):
-    xmin, ymin = points.min(axis=0)
-    xmax, ymax = points.max(axis=0)
-
-    x_edges = np.linspace(xmin-margin, xmax+margin, n_cells + 1)
-    y_edges = np.linspace(ymin-margin, ymax+margin, n_cells + 1)
-    # Adding a 20 unit margin so features don't get cut off
-
-    return x_edges, y_edges
-
-def grid_centers(x_edges, y_edges):
-    xc = (x_edges[:-1] + x_edges[1:]) / 2
-    yc = (y_edges[:-1] + y_edges[1:]) / 2
-
-    xv, yv = np.meshgrid(xc, yc)
-    centers = np.column_stack([xv.ravel(), yv.ravel()])
-
-    return centers, xv.shape
-
-def compute_counts_hist(points, x_edges, y_edges):
-    H, _, _ = np.histogram2d(
-        points[:, 0],
-        points[:, 1],
-        bins=[x_edges, y_edges]
-    )
-    return H.T  # match meshgrid orientation
-
-def compute_density(points, centers, tol, edge_tol):
-    tree = cKDTree(points)
-    # count points within radius tol of each pixel center
-    counts = []
-    for c in centers:
-        neighbours = tree.query_ball_point(c, tol)
-        if len(neighbours)==0:
-            neighbours = tree.query_ball_point(c, edge_tol)
-            if len(neighbours)==0:
-                counts.append(np.nan)
-            else:
-                counts.append(0.0)
-        else:
-            counts.append(len(neighbours)/(np.pi*tol**2/100))
-
-    return np.array(counts)
-
-def save_grid(x_edges, y_edges, values, out_path):
-    xc = (x_edges[:-1] + x_edges[1:]) / 2
-    yc = (y_edges[:-1] + y_edges[1:]) / 2
-
-    rows = []
-    for i, y in enumerate(yc):
-        for j, x in enumerate(xc):
-            rows.append({
-                "X_center": x,
-                "Y_center": y,
-                "Density (cells per 100 um^2)": values[i, j]
-            })
-
-    df = pd.DataFrame(rows)
-    df.to_csv(out_path, index=False)
-
-    plt.figure()
-
-    # extent ensures axes match real coordinates
-    extent = (x_edges[0], x_edges[-1], y_edges[0], y_edges[-1])
-
-    a = df['Density (cells per 100 um^2)'].to_numpy().reshape((len(x_edges) - 1, len(y_edges) - 1))
-    
-    masked_a = np.ma.array(a, mask=a>0)
-    # plt.imshow(
-    #     masked_a,
-    #     origin='upper',
-    #     extent=extent,
-    #     aspect='equal',
-    #     cmap='Greys',
-    #     interpolation='nearest',
-    # )
-
-    # plt.colorbar(label=r"Density (cells per 100 $\mu m^2$)")
-    # plt.xlabel(r"$X \ (\mu m)$")
-    # plt.ylabel(r"$Y \ (\mu m)$")
-    # plt.title("CXCL12 cell density heatmap")
-
-    # plt.savefig('images for album' + out_path[4:-4] + '.png', dpi=300, bbox_inches='tight')
-    # plt.close()
-
-    out_a = np.where(a>0, 1, 0)
-    return out_a
-
-def get_porosities(target_directory, dilation_radius, tissue_tol):
-    out_data = []
-    for file in target_directory.files:
-        if (file.type == 'csv' and 'analysed' not in file.path) and ('Slide' in file.path and 'duplicates_removed' in file.path) and not 'mask' in file.path:    
-            points = file.read()[['X', 'Y']].values
-            xrange, yrange = abs(points[-1,0]-points[0,0]), abs(points[-1,1]-points[0,1])
-
-
-            target_n_cells = 300  # resulting map will have ~target_n_cells^2 pixels.
-
-            x_edges, y_edges = make_grid(points, target_n_cells, margin=0)
-            centers, shape = grid_centers(x_edges, y_edges)
-
-
-            counts = compute_density(points, centers, tol=dilation_radius, edge_tol=tissue_tol)
-            density = counts.reshape(shape)
-
-            # Pixelated heatmap of the density data from the original CSV
-            grid = save_grid(x_edges, y_edges, density, f"{file.path[:-4]}_dilated_tissue_mask.csv")
-
-
-            out_data.append(hole_density_from_array(grid, file.name, xrange, yrange))
-    return pd.DataFrame(out_data)
-
-def get_porosities_whole_directory(target_directory, dilation_radius, tissue_tol):
-    out_data = []
-    for file in target_directory.files:
-        if (file.type == 'csv') and not ('dilated_tissue_mask' in file.name) and not ('hole_densities' in file.name):    
-            points = file.read()[['X', 'Y']].values
-            xrange, yrange = abs(points[-1,0]-points[0,0]), abs(points[-1,1]-points[0,1])
-
-            target_n_cells = 300  # resulting map will have ~target_n_cells^2 pixels.
-
-            x_edges, y_edges = make_grid(points, target_n_cells, margin=0)
-            centers, shape = grid_centers(x_edges, y_edges)
-
-
-            counts = compute_density(points, centers, tol=dilation_radius, edge_tol=tissue_tol)
-            density = counts.reshape(shape)
-
-            # Pixelated heatmap of the density data from the original CSV
-            grid = save_grid(x_edges, y_edges, density, f"{file.path[:-4]}_dilated_tissue_mask.csv")
-
-
-            out_data.append(hole_density_from_array(grid, file.name, xrange, yrange))
-    return pd.DataFrame(out_data)
-
-def analyze_image(
+def analyse_image(
     a: np.ndarray,
     xrange: Tuple[float, float],
     yrange: Tuple[float, float],
-    sample_windows: bool = True,
+    split_into_windows: bool = True,
     window_size: int = 1000,
     n_samples: int = 30,
     allow_overlap: bool = True,
@@ -1003,8 +612,8 @@ def analyze_image(
     image_folder: str = 'troubleshoot_images',
     resolution: float = 1   # Pixels per micrometre
 ):
-    if sample_windows:
-        return analyze_resampled_windows(
+    if split_into_windows:
+        return analyse_resampled_windows(
             a,
             xrange,
             yrange,
@@ -1016,10 +625,11 @@ def analyze_image(
             min_seed_pixels=20,
             cell_dilation_radius=4.0,
             network_dilation_radius=0.5,
-            min_gfp_pixels=int(7E6),
-            min_hole_size=int(5E3), # Trying to remove normal spacing from counts
-            min_cell_size=10,
-            min_cell_radius=3,
+            min_tissue_area_frac=0.4,
+            min_hole_area=4000, # Trying to remove normal spacing from counts of holes
+            max_hole_area=1E5,
+            min_cell_size=50,
+            min_cell_radius=2.0,
             image_folder=image_folder,
             resolution=resolution,
         )
@@ -1034,19 +644,20 @@ def analyze_image(
                 min_seed_pixels=20,
                 cell_dilation_radius=2.0,
                 network_dilation_radius=0.5,
-                min_gfp_pixels=int(5E4),
-                min_hole_size=50,
+                min_tissue_area_frac=0.1, # Doesn't really matter, keep it kinda low for whole images
+                min_hole_area=4000,
+                max_hole_area=1E5,
                 min_cell_size=10,
-                min_cell_radius=3,
+                min_cell_radius=2.0,
                 image_folder=image_folder,
                 resolution=resolution
             )
         ])
 
-def analyze_resampled_windows(
+def analyse_resampled_windows(
         a: np.ndarray, # 2D binary occupancy mask
-        xrange: Tuple[float, float], # width of whole image
-        yrange: Tuple[float, float], # height of whole image
+        xrange: Tuple[float, float], # width of whole image in um
+        yrange: Tuple[float, float], # height of whole image in um
         window_size=100, # Entered in Micrometres, converted to pixels
         n_samples=50,
         allow_overlap=True,
@@ -1055,21 +666,24 @@ def analyze_resampled_windows(
         min_seed_pixels=20,
         cell_dilation_radius=2.0,
         network_dilation_radius=0.5,
-        min_gfp_pixels=int(5E4),
-        min_hole_size=50,
+        min_tissue_area_frac=0.4,
+        min_hole_area=4000, #um^2
+        max_hole_area=1E5, #um^2
         min_cell_size=10,
-        min_cell_radius=3,
+        min_cell_radius=3.0,
         image_folder='troubleshoot_images',
-    resolution=1.0
+        resolution=1.0
     ):
     window_size = int(window_size * resolution) # resolution in pixels per um, so window_size in pixels after here
     results = []
-    while len(results) < 5:
+    window_ids = [i for i in range(1, n_samples+1)]
+    while len(results) < n_samples:
         windows = sample_windows(
             a,
             window_size,
             n_samples,
-            allow_overlap=allow_overlap
+            allow_overlap=allow_overlap,
+            window_ids=copy.copy(window_ids)
         )
 
         for sample_id, y0, y1, x0, x1 in windows:
@@ -1088,8 +702,9 @@ def analyze_resampled_windows(
                 min_seed_pixels=min_seed_pixels,
                 cell_dilation_radius=cell_dilation_radius,
                 network_dilation_radius=network_dilation_radius,
-                min_gfp_pixels=min_gfp_pixels,
-                min_hole_size=min_hole_size,
+                min_tissue_area_frac=min_tissue_area_frac,
+                min_hole_area=min_hole_area,
+                max_hole_area=max_hole_area,
                 min_cell_size=min_cell_size,
                 min_cell_radius=min_cell_radius,
                 image_folder=image_folder,
@@ -1110,9 +725,8 @@ def analyze_resampled_windows(
             elif out['n_cells'] < 50:
                 continue
             else:
+                window_ids.remove(sample_id)
                 results.append(out)
-
-    
 
     return pd.concat([pd.DataFrame(results)])
 
@@ -1123,19 +737,8 @@ Image.MAX_IMAGE_PIXELS = 933120000
 import warnings
 
 if __name__ == '__main__':
-    dilation_radius = 55.0
-    tissue_edge_tol = 60.0
-
-    # target_directory = Folder('data')
-    # out_data = get_porosities(target_directory, dilation_radius=dilation_radius, tissue_tol = tissue_edge_tol) # Units of micrometres
-    # out_data.to_csv(f'hole_densities_{dilation_radius}_{tissue_edge_tol}.csv')
-
-    # target_directory = Folder('mask particle csvs from Clara')
-    # out_data = get_porosities_whole_directory(target_directory, dilation_radius=dilation_radius, tissue_tol = tissue_edge_tol) # Units of micrometres
-    # out_data.to_csv(f'mask particle csvs from Clara/hole_densities_{dilation_radius}_{tissue_edge_tol}.csv')
-
     target_directory = Folder('mask tif files from Clara')
-    hold_list = ['M5hip_right_bin.tif']
+    hold_list = ['M1hip_bin.tif', 'M2hip_bin.tif', 'M1femur_bin.tif', 'M5hip_left_bin.tif', 'M5hip_right_bin.tif']
     for file in target_directory.files:
         if file.type == 'tif':
             if file.name.split('_')[-1] == 'bin.tif' and not file.name in hold_list:
@@ -1143,25 +746,22 @@ if __name__ == '__main__':
 
                 with Image.open(file.path) as img:
                     meta_dict = {TAGS[key] : img.tag[key] for key in img.tag.keys()}
-                resolution = meta_dict['XResolution'][0]
-                if resolution != meta_dict['YResolution'][0]:
+                resolution = float(img.tag_v2.get(282))  # 282 = XResolution tag, returns a clean float
+                if resolution != float(img.tag_v2.get(283)):
                     raise ValueError('Axes not set equal in Tif image.')
                 if not 'micron' in meta_dict['ImageDescription'][0]:
                     warnings.warn("Warning - image length not in units of Micrometres.")
-                resolution = resolution[0]/resolution[1]
-
-                df = analyze_image(
+                print('Analysing ' + file.name)
+                df = analyse_image(
                     a=image,
-                    xrange=(0, image.shape[0]),
-                    yrange=(0, image.shape[1]),
-                    sample_windows=True, # Process full image or not - full image is usually too big!
+                    xrange=(0, image.shape[1]),
+                    yrange=(0, image.shape[0]),
+                    split_into_windows=True, # Process full image or not - full image is usually too big!
                     filename=file.name,
                     image_folder='troubleshoot_images',
                     resolution=resolution,
-                    window_size=1500,
-                    n_samples=5,
+                    window_size=1600,
+                    n_samples=8,
                     allow_overlap=True
                 )
                 df.dropna().to_csv(file.path[:-4] + '_resampled_analysed.csv')
-        # except:
-        #     print(f'Error on {file.path}, skipping to next.')

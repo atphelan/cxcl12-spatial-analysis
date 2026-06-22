@@ -1,670 +1,236 @@
 from utils import Folder
-import os
-
 import pandas as pd
-# import json
-# import operator
 import numpy as np
-from scipy.spatial import cKDTree
-from scipy.stats import f_oneway, ttest_ind
-from scipy.interpolate import griddata as interp_grid
-from shapely.geometry import Point
-from shapely.ops import unary_union
-from sklearn.cluster import KMeans
-import random
-
-import matplotlib.pyplot as plt
-from matplotlib import cm
-import copy
-
-def morans_i(x, y, values):
-    """
-    Compute Moran's I using inverse distance weights.
-    """
-    n = len(values)
-    coords = np.column_stack((x, y))
-
-    # Distance matrix
-    dist_matrix = np.sqrt(((coords[:, None, :] - coords[None, :, :]) ** 2).sum(axis=2))
-    
-    # Avoid division by zero (self-distance)
-    with np.errstate(divide='ignore'):
-        weights = 1 / dist_matrix
-    np.fill_diagonal(weights, 0)
-
-    # Normalise weights
-    W = weights.sum()
-
-    mean_val = values.mean()
-    diff = values - mean_val
-
-    numerator = np.sum(weights * np.outer(diff, diff))
-    denominator = np.sum(diff ** 2)
-
-    return (n / W) * (numerator / denominator)
-
-def local_counts(tree, points, r):
-    """
-    Count neighbors within radius r for each point (excluding self).
-    """
-    counts = tree.query_ball_point(points, r, return_length=True)
-    return counts - 1  # remove self-count
-
-
-def simulate_csr(bounds, n_points):
-    """
-    Generate uniform random points in bounding box.
-    bounds: [(xmin, xmax), (ymin, ymax), ...]
-    """
-    dim = len(bounds)
-    pts = np.zeros((n_points, dim))
-    for d, (low, high) in enumerate(bounds):
-        pts[:, d] = np.random.uniform(low, high, size=n_points)
-    return pts
-
-
-def local_clustering_significance(points, r, n_sim=100):
-    """
-    Compute local clustering significance vs CSR.
-
-    Returns:
-        observed_counts
-        z_scores
-        p_values (two-sided)
-    """
-    n = len(points)
-    dim = points.shape[1]
-
-    # Build tree for observed data
-    tree = cKDTree(points)
-    observed = local_counts(tree, points, r)
-
-    # Bounding box
-    bounds = [(points[:, d].min(), points[:, d].max()) for d in range(dim)]
-
-    # Null simulations
-    sim_counts = np.zeros((n_sim, n))
-
-    for i in range(n_sim):
-        sim_pts = simulate_csr(bounds, n)
-        sim_tree = cKDTree(sim_pts)
-
-        # IMPORTANT: evaluate at observed locations
-        sim_counts[i] = local_counts(sim_tree, points, r)
-
-    # Mean and std under null
-    mu = sim_counts.mean(axis=0)
-    sigma = sim_counts.std(axis=0, ddof=1)
-
-    # Avoid divide-by-zero
-    sigma[sigma == 0] = np.nan
-
-    z = (observed - mu) / sigma
-
-    # Two-sided empirical p-values
-    p = np.mean(np.abs(sim_counts - mu) >= np.abs(observed - mu), axis=0)
-
-    return observed, z, p
-
-def ripley_k_l(points, radii, area, tree=None, edge_correction=True, intensity=None):
-    """
-    Compute Ripley's K and L functions.
-
-    Parameters:
-        points (ndarray): Nx2 array of (x, y)
-        radii (ndarray): radii at which to evaluate K
-        area (float): total observation window area
-        tree (cKDTree): optional precomputed tree
-        edge_correction (bool): apply border correction
-
-    Returns:
-        K (ndarray), L (ndarray)
-    """
-    n = len(points)
-    if intensity is None:
-        intensity = n / area  # lambda
-
-    if tree is None:
-        tree = cKDTree(points)
-
-    # Bounding box (for edge correction)
-    xmin, ymin = points.min(axis=0)
-    xmax, ymax = points.max(axis=0)
-
-    K = np.zeros_like(radii, dtype=float)
-
-    for i, r in enumerate(radii):
-        counts = []
-
-        for idx, p in enumerate(points):
-            if edge_correction:
-                # Skip points too close to boundary
-                if (p[0] - xmin < r or xmax - p[0] < r or
-                    p[1] - ymin < r or ymax - p[1] < r):
-                    continue
-
-            # Count neighbors within r (exclude self)
-            neighbors = tree.query_ball_point(p, r)
-            counts.append(len(neighbors) - 1)
-
-        if len(counts) == 0:
-            K[i] = np.nan
-        else:
-            K[i] = np.mean(counts) / intensity
-
-    # L-function
-    L = np.sqrt(K / np.pi)
-
-    return K, L
-
-
-def load_points_from_csv(path):
-    df = pd.read_csv(path)
-    return df[['X', 'Y']].values
-
-
-def compute_area(points):
-    # Simple bounding box area (replace if you have a mask/window)
-    xmin, ymin = points.min(axis=0)
-    xmax, ymax = points.max(axis=0)
-    return (xmax - xmin) * (ymax - ymin)
-
-def compute_area_mask(points, buffer_radius):
-    return build_mask(points, buffer_radius = buffer_radius).area
-
-# -------------------------
-# Load data
-# -------------------------
-def load_points(path):
-    df = pd.read_csv(path)
-    return df[['X', 'Y']].values
-
-
-# -------------------------
-# 5-NN distance
-# -------------------------
-def mean_kNN_distance(points, k=5):
-    tree = cKDTree(points)
-    dists, _ = tree.query(points, k=k+1)  # includes self
-    return np.mean(dists[:, 1:])  # drop self
-
-
-# -------------------------
-# Build spatial mask
-# -------------------------
-def build_mask(points, buffer_radius=5.0):
-    circles = [Point(p).buffer(buffer_radius) for p in points]
-    region = unary_union(circles)
-    return region
-
-
-# -------------------------
-# Sample uniformly in mask
-# -------------------------
-def sample_points_in_region(region, n_points, sep_min, max_attempts=100000):
-    minx, miny, maxx, maxy = region.bounds
-    samples = []
-
-    tree = None
-    attempts = 0
-
-    while len(samples) < n_points and attempts < max_attempts:
-        attempts += 1
-
-        x = random.uniform(minx, maxx)
-        y = random.uniform(miny, maxy)
-
-        if not region.contains(Point(x, y)):
-            continue
-
-        if tree is not None:
-            # Query nearest existing point
-            dist, _ = tree.query([x, y], k=1)
-            if dist < sep_min:
-                continue
-
-        # Accept point
-        samples.append([x, y])
-
-        # Rebuild tree periodically (cheap enough for moderate sizes)
-        tree = cKDTree(samples)
-
-    if len(samples) < n_points:
-        print(f"Warning: only placed {len(samples)} points after {attempts} attempts")
-
-    return np.array(samples)
-
-
-# -------------------------
-# Run CSR simulation
-# -------------------------
-def csr_simulation(points, n_sim=10, k=5, buffer_radius=15.0, sep_min=0, fname='testname'):
-    n = len(points)
-
-    # observed statistic
-    obs = mean_kNN_distance(points, k=k)
-
-    # build support
-    region = build_mask(points, buffer_radius)
-
-    sims = []
-    for _ in range(n_sim):
-        sim_pts = sample_points_in_region(region, n, sep_min=sep_min)
-        sims.append(mean_kNN_distance(sim_pts, k=k))
-
-    sims = np.array(sims)
-
-    plt.figure()
-    plt.scatter(points[:, 0], points[:, 1], s=5, label="Real")
-    plt.scatter(sim_pts[:, 0], sim_pts[:, 1], s=5, label="CSR", alpha=0.6)
-    plt.legend()
-    plt.title("Real vs CSR point patterns")
-    plt.xlabel(r"$X \ (\mu m)$")
-    plt.ylabel(r"$Y \ (\mu m)$")
-    plt.axis("equal")
-    plt.savefig('images' + fname[4:-4] + '_simulated.png')
-    plt.close()
-
-    # standardization
-    mean_sim = sims.mean()
-    std_sim = sims.std()
-
-    z = (obs - mean_sim) / std_sim if std_sim > 0 else np.nan
-
-    return {
-        "observed": obs,
-        "random_mean": mean_sim,
-        "random_std": std_sim,
-        "z_score": z,
-        "sim_values": sims
-    }
-
-# # -------------------------
-# # Load points
-# # -------------------------
-# def load_points(path):
-#     df = pd.read_csv(path)
-#     return df[['X', 'Y']].values
-
-
-# # -------------------------
-# # Compute bounding area
-# # -------------------------
-# def compute_area(points):
-#     xmin, ymin = points.min(axis=0)
-#     xmax, ymax = points.max(axis=0)
-#     return (xmax - xmin) * (ymax - ymin)
-
-
-# -------------------------
-# Clark–Evans index
-# -------------------------
-def clark_evans(points):
-    n = len(points)
-    area = compute_area(points)
-    density = n / area
-
-    tree = cKDTree(points)
-    dists, _ = tree.query(points, k=2)  # k=2 includes self
-    nn = dists[:, 1]
-
-    r_obs = nn.mean()
-    r_exp = 1 / (2 * np.sqrt(density))
-
-    R = r_obs / r_exp
-    return R, r_obs, r_exp
-
-
-# -------------------------
-# Density proxy per point
-# -------------------------
-def local_density(points, k=5):
-    tree = cKDTree(points)
-    dists, _ = tree.query(points, k=k+1)
-    mean_knn = dists[:, 1:].mean(axis=1)
-    return 1 / mean_knn  # inverse distance ≈ density
-
-
-# -------------------------
-# Split into density groups
-# -------------------------
-def split_density_regions(points, n_regions=3):
-    dens = local_density(points)
-
-    # cluster by density only (not spatial position)
-    km = KMeans(n_clusters=n_regions, n_init=10)
-    labels = km.fit_predict(dens.reshape(-1, 1))
-
-    regions = []
-    for i in range(n_regions):
-        region_pts = points[labels == i]
-        if len(region_pts) > 5:  # avoid tiny groups
-            regions.append(region_pts)
-
-    return regions
-
-
-# -------------------------
-# Full analysis
-# -------------------------
-def analyze_clark_evans(points, n_regions=3):
-    results = {}
-
-    # overall
-    R, r_obs, r_exp = clark_evans(points)
-    results["overall"] = {"R": R, "r_obs": r_obs, "r_exp": r_exp}
-
-    # regions
-    regions = split_density_regions(points, n_regions)
-
-    region_results = []
-    for i, pts in enumerate(regions):
-        R, r_obs, r_exp = clark_evans(pts)
-        region_results.append({
-            "region": i,
-            "n_points": len(pts),
-            "R": R,
-            "r_obs": r_obs,
-            "r_exp": r_exp
-        })
-
-    results["regions"] = region_results
-    return results
-
-# -------------------------
-# Build grid
-# -------------------------
-def make_grid(points, n_cells=100, margin=0):
-    xmin, ymin = points.min(axis=0)
-    xmax, ymax = points.max(axis=0)
-
-    x_edges = np.linspace(xmin-margin, xmax+margin, n_cells + 1)
-    y_edges = np.linspace(ymin-margin, ymax+margin, n_cells + 1)
-    # Adding a 20 unit margin so features don't get cut off
-
-    return x_edges, y_edges
-
-def make_equal_axis_grid(points, target_n_cells=100, margin=0):
-    xmin, ymin = points.min(axis=0)
-    xmax, ymax = points.max(axis=0)
-
-    nx = target_n_cells * (xmax - xmin)/(ymax - ymin)
-
-    x_edges = np.linspace(xmin-margin, xmax+margin, int(nx) + 1)
-    y_edges = np.linspace(ymin-margin, ymax+margin, int(target_n_cells**2/nx) + 1)
-    # Adding a 20 unit margin so features don't get cut off
-
-    return x_edges, y_edges
-
-
-# -------------------------
-# Pixel centers
-# -------------------------
-def grid_centers(x_edges, y_edges):
-    xc = (x_edges[:-1] + x_edges[1:]) / 2
-    yc = (y_edges[:-1] + y_edges[1:]) / 2
-
-    xv, yv = np.meshgrid(xc, yc)
-    centers = np.column_stack([xv.ravel(), yv.ravel()])
-
-    return centers, xv.shape
-
-
-# -------------------------
-# Density calculation
-# -------------------------
-def compute_density(points, centers, tol, edge_tol):
-    tree = cKDTree(points)
-    # count points within radius tol of each pixel center
-    counts = []
-    for c in centers:
-        neighbours = tree.query_ball_point(c, tol)
-        if len(neighbours)==0:
-            neighbours = tree.query_ball_point(c, edge_tol)
-            if len(neighbours)==0:
-                counts.append(np.nan)
-            else:
-                counts.append(0.0)
-        else:
-            counts.append(len(neighbours)/(np.pi*tol**2/100))
-
-    return np.array(counts)
-
-
-# -------------------------
-# Fast raw counts per pixel
-# -------------------------
-def compute_counts_hist(points, x_edges, y_edges):
-    H, _, _ = np.histogram2d(
-        points[:, 0],
-        points[:, 1],
-        bins=[x_edges, y_edges]
-    )
-    return H.T  # match meshgrid orientation
-
-
-# -------------------------
-# Save to CSV
-# -------------------------
-def save_grid(x_edges, y_edges, values, out_path):
-    xc = (x_edges[:-1] + x_edges[1:]) / 2
-    yc = (y_edges[:-1] + y_edges[1:]) / 2
-
-    rows = []
-    for i, y in enumerate(yc):
-        for j, x in enumerate(xc):
-            rows.append({
-                "X_center": x,
-                "Y_center": y,
-                "Density (cells per 100 um^2)": values[i, j]
-            })
-
-    df = pd.DataFrame(rows)
-    df.to_csv(out_path, index=False)
-
-    plt.figure()
-
-    # extent ensures axes match real coordinates
-    extent = (x_edges[0], x_edges[-1], y_edges[0], y_edges[-1])
-
-    a = df['Density (cells per 100 um^2)'].to_numpy().reshape((len(x_edges) - 1, len(y_edges) - 1))
-    
-    masked_a = np.ma.array(a, mask=np.isnan(a))
-    cmap = copy.copy(cm.jet)
-    cmap.set_bad('white',1.)
-    plt.imshow(
-        masked_a,
-        origin='upper',
-        extent=extent,
-        aspect='equal',
-        cmap=cmap,
-        interpolation='nearest',
-    )
-
-    plt.colorbar(label=r"Density (cells per 100 $\mu m^2$)")
-    plt.xlabel(r"$X \ (\mu m)$")
-    plt.ylabel(r"$Y \ (\mu m)$")
-    plt.title("CXCL12 cell density heatmap")
-
-    plt.savefig('images for album' + out_path[4:-4] + '.png', dpi=300, bbox_inches='tight')
-    plt.close()
-
-
-def analyse_files(target_directory):
-    for file in target_directory.files:
-        if (file.type == 'csv' and 'analysed' not in file.path) and ('Slide' in file.path and 'duplicates_removed' in file.path):
-            df = pd.read_csv(file.path)
-            if ' ' in df.columns:
-                df.index = df[' ']
-                df.drop(columns=[' '], inplace=True)
-
-            coords = df[['X', 'Y']].values
-            tree = cKDTree(coords)
-
-            # Query k=6 because the first neighbour is the point itself
-            dists, indices = tree.query(coords, k=6)
-
-            # Remove self (first column)
-            dists = dists[:, 1:]
-            indices = indices[:, 1:] + min(df.index) # Also start counting from 1 as in the data
-
-            # Nearest neighbour (k=1 after removing self)
-            df['Nearest neighbour ID'] = indices[:, 0]
-            df['Distance to nearest neighbour'] = dists[:, 0]
-
-            # Top 5 neighbours
-            df['5 nearest neighbour IDs'] = list(indices)
-            df['Mean distance to 2 nearest neighbours'] = dists[:,0:2].mean(axis=1)
-            df['Mean distance to 5 nearest neighbours'] = dists.mean(axis=1)
-            df['Local density (cells / 100 um^2)'] = 1/df['Mean distance to 5 nearest neighbours']
-
-            # # Global mean
-            # global_mean_2nn = df['Mean distance to 2 nearest neighbours'].mean()
-            # global_mean_5nn = df['Mean distance to 5 nearest neighbours'].mean()
-
-            # Optional: mean pairwise distance (vectorised)
-            diff = coords[:, None, :] - coords[None, :, :]
-            pairwise_dists = np.sqrt((diff ** 2).sum(axis=2))
-            min_dist = 15 # diameter of stromal cell is roughly 15 um
-            mean_pairwise = pairwise_dists.sum(axis=1) / (len(df) - 1)
-            std_pairwise = None
-            df['Mean pairwise distance'] = mean_pairwise
-
-            points = load_points(file.path)
-        
-            print(file.name)
-
-            result = csr_simulation(
-                points,
-                n_sim=30,
-                k=2,
-                buffer_radius=60.0, # Roughly 8x radius of stromal cell.
-                # This means there's a potentially much larger area for the CSR - extra unlikely to report significant dispersion
-                sep_min=min_dist,
-                fname=file.path
-            )
-
-            for k, v in result.items():
-                result[k] = np.round(v, 2)
-
-            print(result, '\n')
-
-            # Save output
-            df.to_csv(file.path[:-4] + '_analysed.csv', index=False)
-
-
-            # Heatmap of density
-            target_n_cells = 300  # resulting map will have ~target_n_cells^2 pixels.
-            tol = 10.0   # neighbourhood radius to find cells in, must be set
-            tissue_edge_tol = 60.0 # Mark anything further away from a cell than this as NaN
-
-            x_edges, y_edges = make_grid(points, target_n_cells, margin=20)
-            centers, shape = grid_centers(x_edges, y_edges)
-
-            if tol is None:
-                density = compute_counts_hist(points, x_edges, y_edges)
-            else:
-                counts = compute_density(points, centers, tol, tissue_edge_tol)
-                # if len(counts)//target_n_cells != target_n_cells:
-                #     pass
-                density = counts.reshape(shape)
-
-            # Pixelated heatmap of the density data from the original CSV
-            save_grid(x_edges, y_edges, density, f"{file.path[:-4]}_analysed_density_map.csv")
-
-
-def make_summary_table(target_directory):
-    data_dict_list = []
-    anova_data = []
-    if os.path.exists('analysed_data_summary.csv'):
-        threshold_density = pd.read_csv('analysed_data_summary.csv')['Mean 2nn distance'].mean()
-        threshold_density = 4*2*100/(2*np.pi*threshold_density**2)
-    else:
-        threshold_density = 0.3
-    for file in target_directory.files:
-        if (file.type == 'csv' and 'analysed' in file.path) and not 'dilate' in file.name:
-            df = pd.read_csv(file.path)
-            anova_data.append((5/df['Mean distance to 5 nearest neighbours']).to_list())
-            global_mean_2nn = round(df['Mean distance to 2 nearest neighbours'].mean(),2)
-            global_mean_5nn = round(df['Mean distance to 5 nearest neighbours'].mean(),2)
-            data_dict_list.append({'name': file.name.split('annotation')[0][:-1] + ('_' + file.name[-14] if str.isdigit(file.name[-14]) else ''), 'Mean 2nn distance': global_mean_2nn, 'Mean 5nn distance': global_mean_5nn})
-    
-            # -------------------------
-            # Clark-Evans index analysis of clustering
-            # -------------------------
-
-            # points = load_points(file.path)
-            # results = analyze_clark_evans(points, n_regions=3)
-
-            # print("\nOverall Clark-Evans:")
-            # print(results["overall"])
-            # data_dict_list[-1].update({'Overall Clark-Evans': results['overall']})
-
-            # print("\nRegions:")
-            # for r in results["regions"]:
-            #     print(r)
-            #     data_dict_list[-1].update({f'Region {r["region"]} Clark-Evans': r['R'], f'Region {r["region"]} density': 1/r['r_obs'], f'Number of points in region {r["region"]}': r['n_points']})
-            
-
-            # Analysis of density heatmap data
-
-            density_data = pd.read_csv(file.path[:-12] + 'analysed_density_map.csv')
-            
-            density_data = density_data.loc[density_data['Density (cells per 100 um^2)'] > 1E-8]
-            density_data['density class'] = density_data['Density (cells per 100 um^2)'] > threshold_density # 2xMean drawn from samples across different bones
-
-            data_dict_list[-1].update({'Percentage coverage high density pixels': round(100*density_data['density class'].mean(), 1)})
-            
-    # sorted_dict = dict(sorted(data_dict.items(), key=operator.itemgetter(0)))
-    # with open('analysed_data_summary.json', 'w') as f:
-    #     json.dump(sorted_dict, f)
-    f_stat, p_val = f_oneway(*anova_data)
-    t_test_list = []
-    for i in range(1,9):
-        for j in range(1,9):
-            if j>i:
-                tt_res = ttest_ind(anova_data[i-1], anova_data[j-1])
-                t_test_list.append({'Slides compared': f'{i} and {j}', 't': tt_res.statistic, 'p': tt_res.pvalue})
-    t_test_list.append({'Slides compared': 'All', 'f': f_stat, 'p': p_val})
-    pd.DataFrame(t_test_list).to_csv('analysed_data_tests.csv')
-    pd.DataFrame(data_dict_list).sort_values('name').to_csv('analysed_data_summary.csv')
-
+from scipy.stats import shapiro, ttest_rel, wilcoxon
 
 def make_summary_table_10images(target_directory):
     data_dict_list = []
     anova_data = {}
-    anova_variable = 'hole_coverage'
+    anova_variables = ['hole_coverage', 'cell_density']
+    for variable in anova_variables:
+        for file in target_directory.files:
+            if (file.type == 'csv' and 'analysed' in file.path) and not 'dilate' in file.name:
+                df = pd.read_csv(file.path)
+                anova_data.update({'name': file.name.split('_bin')[0], 'hole_coverage': df['hole_coverage'].mean(), 'cell_density': df['cell_density'].mean()})
+                data_dict_list.append({'name': file.name.split('_bin')[0]})
+
+        # Build paired arrays, ensuring animal order matches
+        paired = [
+            (name, anova_data[name], anova_data[name.replace('hip', 'femur')])
+            for name in anova_data.keys()
+            if 'hip' in name and name.replace('hip', 'femur') in anova_data
+        ]
+
+        hip_means   = [np.mean(h) for _, h, _ in paired]
+        femur_means = [np.mean(_, f) for _, _, f in paired]  
+
+        # Check normality of differences first (Shapiro-Wilk)
+        differences = np.array(hip_means) - np.array(femur_means)
+        stat, p_norm = shapiro(differences)
+        print(f'Shapiro-Wilk on differences: W={stat:.3f}, p={p_norm:.3f}')
+
+        if p_norm > 0.05:
+            # Differences are plausibly normal — paired t-test
+            result = ttest_rel(hip_means, femur_means)
+            print(f'Paired t-test: t={result.statistic:.3f}, p={result.pvalue:.3f}')
+        else:
+            # Non-normal — Wilcoxon signed-rank
+            result = wilcoxon(hip_means, femur_means)
+            print(f'Wilcoxon signed-rank: W={result.statistic:.3f}, p={result.pvalue:.3f}')
+
+
+def run_paired_statistics(target_directory, metrics=None, min_windows=3):
+    """
+    Runs paired statistical tests (Wilcoxon signed-rank + paired t-test)
+    comparing hip vs femur for each metric, using per-image means.
+
+    Parameters
+    ----------
+    target_directory : Folder
+        Directory containing analysed CSV files.
+
+    metrics : list of str or None
+        Metrics to test. Defaults to all numeric outcome columns.
+
+    min_windows : int
+        Minimum number of valid windows required to include an image.
+        Images with fewer windows are excluded with a warning.
+
+    Returns
+    -------
+    results_df : pd.DataFrame
+        Table of test statistics and p-values for each metric.
+    """
+
+    if metrics is None:
+        metrics = [
+            'n_holes', 'hole_density', 'hole_area', 'hole_coverage',
+            'mean_hole_area', 'largest_hole_area', 'std_hole_area',
+            'cv_hole_area', 'filled_area', 'n_cells', 'cell_density',
+            'mean_cell_area'
+        ]
+
+    # --------------------------------------------------------
+    # Load and average all valid files
+    # --------------------------------------------------------
+
+    image_means = {}  # { image_base_name : { metric : mean_value } }
+
     for file in target_directory.files:
-        if (file.type == 'csv' and 'analysed' in file.path) and not 'dilate' in file.name:
-            df = pd.read_csv(file.path)
-            anova_data.update({file.name.split('_bin')[0]: (df[anova_variable]).to_list()})
-            data_dict_list.append({k: round(df[k].mean(), 6) for k in ['n_holes', 'hole_density', 'hole_area', 'hole_coverage', 'filled_area', 'n_cells', 'cell_density']})
-            data_dict_list[-1].update({'name': file.name.split('_bin')[0]})
-            
-    f_stat, p_val = f_oneway(*[a for a in anova_data.values()])
-    t_test_list = []
+        if file.type != 'csv':
+            continue
+        if 'analysed' not in file.path:
+            continue
+        if 'dilate' in file.name:
+            continue
 
-    # for i, ki in enumerate(anova_data.keys()):
-    #     for j, kj in enumerate(anova_data.keys()):
-    #         if j>i:
-    #             tt_res = ttest_ind(anova_data[ki], anova_data[kj])
-    #             t_test_list.append({'Slides compared': f'{ki} and {kj}', 't': tt_res.statistic, 'p': tt_res.pvalue})
-    # t_test_list.append({'Slides compared': 'All', 'f': f_stat, 'p': p_val})
+        df = pd.read_csv(file.path)
 
-    for ki in anova_data.keys():
-        if 'hip' in ki:
-            kj = ki.split('_')[0].replace('hip', 'femur')
-            tt_res = ttest_ind(anova_data[ki], anova_data[kj])
-            t_test_list.append({'Slides compared': f'{ki} and {kj}', 't': tt_res.statistic, 'p': tt_res.pvalue})
-    t_test_list.append({'Slides compared': 'All', 'f': f_stat, 'p': p_val})
+        if len(df) < min_windows:
+            print(f"  [WARN] {file.name}: only {len(df)} windows — skipping (min={min_windows})")
+            continue
 
-    pd.DataFrame(t_test_list).to_csv(f'analysed_data_tests_{anova_variable}.csv')
-    pd.DataFrame(data_dict_list).sort_values('name').to_csv('analysed_data_summary.csv')
+        base_name = file.name.split('_bin')[0]  # e.g. 'M3hip' or 'M3femur'
 
+        image_means[base_name] = {
+            metric: df[metric].mean()
+            for metric in metrics
+            if metric in df.columns
+        }
 
+    if not image_means:
+        raise ValueError("No valid files found. Check target_directory and file naming.")
+
+    # --------------------------------------------------------
+    # Build matched hip / femur pairs
+    # --------------------------------------------------------
+
+    pairs = []
+
+    for name, values in image_means.items():
+        if 'hip' not in name:
+            continue
+
+        partner = name.replace('hip', 'femur')
+
+        if partner not in image_means:
+            print(f"  [WARN] No matching femur found for {name} — skipping.")
+            continue
+
+        pairs.append((name, partner))
+
+    if not pairs:
+        raise ValueError("No matched hip/femur pairs found. Check file naming.")
+
+    n_pairs = len(pairs)
+    print(f"\nFound {n_pairs} matched hip/femur pairs:")
+    for hip, femur in pairs:
+        print(f"  {hip}  <-->  {femur}")
+
+    # --------------------------------------------------------
+    # Run tests for each metric
+    # --------------------------------------------------------
+
+    results = []
+
+    for metric in metrics:
+
+        hip_means   = [image_means[hip][metric]   for hip, _      in pairs if metric in image_means[hip]]
+        femur_means = [image_means[femur][metric]  for _,   femur  in pairs if metric in image_means[femur]]
+
+        if len(hip_means) != len(femur_means) or len(hip_means) < 2:
+            print(f"  [WARN] {metric}: insufficient paired data — skipping.")
+            continue
+
+        hip_means   = np.array(hip_means)
+        femur_means = np.array(femur_means)
+        differences = hip_means - femur_means
+
+        # --- Shapiro-Wilk on differences ---
+        if len(differences) >= 3:  # Shapiro requires n >= 3
+            sw_stat, sw_p = shapiro(differences)
+        else:
+            sw_stat, sw_p = np.nan, np.nan
+
+        # --- Paired t-test ---
+        tt  = ttest_rel(hip_means, femur_means)
+
+        # --- Wilcoxon signed-rank ---
+        # Requires n >= 2; catches edge case where all differences are zero
+        try:
+            wx = wilcoxon(hip_means, femur_means)
+            wx_stat, wx_p = wx.statistic, wx.pvalue
+        except ValueError as e:
+            wx_stat, wx_p = np.nan, np.nan
+            print(f"  [WARN] Wilcoxon failed for {metric}: {e}")
+
+        results.append({
+            'metric':               metric,
+            'n_pairs':              n_pairs,
+
+            # Per-group descriptives
+            'hip_mean':             np.mean(hip_means),
+            'hip_std':              np.std(hip_means,   ddof=1),
+            'femur_mean':           np.mean(femur_means),
+            'femur_std':            np.std(femur_means, ddof=1),
+
+            # Normality of differences
+            'shapiro_W':            round(sw_stat, 4) if not np.isnan(sw_stat) else np.nan,
+            'shapiro_p':            round(sw_p,    4) if not np.isnan(sw_p)    else np.nan,
+            'differences_normal':   'yes' if sw_p > 0.05 else 'no',
+
+            # Paired t-test
+            't_stat':               round(tt.statistic, 4),
+            't_p':                  round(tt.pvalue,    4),
+
+            # Wilcoxon signed-rank
+            'wilcoxon_W':           round(wx_stat, 4) if not np.isnan(wx_stat) else np.nan,
+            'wilcoxon_p':           round(wx_p,    4) if not np.isnan(wx_p)    else np.nan,
+
+            # Recommended test given normality check
+            'recommended_test':     'paired_t' if sw_p > 0.05 else 'wilcoxon',
+            'recommended_p':        round(tt.pvalue, 4) if sw_p > 0.05 else round(wx_p, 4),
+        })
+
+    results_df = pd.DataFrame(results).set_index('metric')
+
+    # --------------------------------------------------------
+    # Print summary
+    # --------------------------------------------------------
+
+    print(f"\n{'='*70}")
+    print(f"  PAIRED STATISTICAL TESTS — hip vs femur  (n={n_pairs} pairs)")
+    print(f"{'='*70}")
+    print(f"{'Metric':<22} {'Hip mean':>12} {'Femur mean':>12} {'Normal?':>8} "
+        f"{'Test':>10} {'p':>8} {'Sig':>5}")
+    print(f"{'-'*70}")
+
+    for _, row in results_df.iterrows():
+        sig = (
+            '***' if row['recommended_p'] < 0.001 else
+            '**'  if row['recommended_p'] < 0.01  else
+            '*'   if row['recommended_p'] < 0.05  else
+            'ns'
+        )
+        print(
+            f"{row.name:<22} "
+            f"{row['hip_mean']:>12.4g} "
+            f"{row['femur_mean']:>12.4g} "
+            f"{row['differences_normal']:>8} "
+            f"{row['recommended_test']:>10} "
+            f"{row['recommended_p']:>8.4f} "
+            f"{sig:>5}"
+        )
+
+    print(f"{'='*70}")
+    print("Significance: * p<0.05   ** p<0.01   *** p<0.001   ns = not significant")
+    print("Note: Shapiro-Wilk has low power at small n — consider Wilcoxon as default.\n")
+
+    return results_df
 
 if __name__ == '__main__':
     target_directory = Folder('mask tif files from Clara')
     # analyse_files(target_directory)
-    make_summary_table_10images(target_directory)
+    # make_summary_table_10images(target_directory)
+    run_paired_statistics(target_directory)
 
