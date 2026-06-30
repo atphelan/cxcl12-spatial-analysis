@@ -65,9 +65,8 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
     if metrics is None:
         metrics = [
             'n_holes', 'hole_density', 'hole_area', 'hole_coverage',
-            'mean_hole_area', 'largest_hole_area', 'std_hole_area',
-            'cv_hole_area', 'filled_area', 'n_cells', 'cell_density',
-            'mean_cell_area'
+            'mean_hole_area', 'std_hole_area',
+            'filled_area', 'n_cells', 'cell_density',
         ]
 
     # --------------------------------------------------------
@@ -233,4 +232,3 @@ if __name__ == '__main__':
     # analyse_files(target_directory)
     # make_summary_table_10images(target_directory)
     run_paired_statistics(target_directory)
-
