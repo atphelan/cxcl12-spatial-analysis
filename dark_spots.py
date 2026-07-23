@@ -6,6 +6,7 @@ matplotlib.use('Agg')
 from matplotlib import pyplot as plt, cm, ticker, colors
 from scipy.spatial import cKDTree
 from scipy.ndimage import label, convolve
+from scipy.spatial.distance import pdist, squareform
 from skimage import io
 from skimage.draw import line
 from skimage.morphology import binary_dilation, disk
@@ -13,6 +14,16 @@ import copy
 
 from utils import Folder
 from typing import Tuple
+
+black_to_green = colors.LinearSegmentedColormap.from_list(
+    name="black_to_green",
+    colors=["black", "lime", "lime", "lime", "lime"]  # "lime" = bright green (#00FF00), Saturated a fair bit
+)
+
+black_to_blue = colors.LinearSegmentedColormap.from_list(
+    name="black_to_blue",
+    colors=["black", "blue", "blue", "blue", "blue"]
+)
 
 def sample_windows(a, window_size, n_samples, window_ids=None, allow_overlap=True, seed=None):
     """
@@ -293,6 +304,396 @@ def sample_windows_modes(
 
     return windows, report
 
+class _TileAccepted(Exception):
+    """Break all loops — excellent tile found."""
+    pass
+
+class _SkipRegion(Exception):
+    """Break out of size loops — current origin is unpromising."""
+    pass
+
+def _integral_image(arr: np.ndarray) -> np.ndarray:
+    """
+    Summed area table with a zero-padded border, so that:
+        integral[y, x] = sum of arr[0:y, 0:x]
+    This means integral[0, :] == 0 and integral[:, 0] == 0,
+    and a rectangle sum arr[y0:y1, x0:x1] is always:
+        integral[y1, x1] - integral[y0, x1] - integral[y1, x0] + integral[y0, x0]
+    with no edge case handling needed.
+    """
+    padded = np.zeros(
+        (arr.shape[0] + 1, arr.shape[1] + 1),
+        dtype=np.float32
+    )
+    padded[1:, 1:] = np.cumsum(np.cumsum(arr.astype(np.float32), axis=0), axis=1)
+    return padded
+
+
+def _rect_sum(integral: np.ndarray, y0: int, x0: int, y1: int, x1: int) -> float:
+    """
+    Query a padded integral image for the sum of arr[y0:y1, x0:x1].
+    No edge case handling needed due to the zero padding.
+    """
+    return float(
+        integral[y1, x1]
+        - integral[y0, x1]
+        - integral[y1, x0]
+        + integral[y0, x0]
+    )
+
+def sample_windows_adaptive(
+    a: np.ndarray,
+    tissue_mask: np.ndarray,
+    base_size: int,
+    size_tolerance: float = 0.2,
+    overlap_fraction: float = 0.05,
+    min_tissue_fraction: float = 0.4,
+    search_stride: int = 50,
+    seed: int = None
+) -> Tuple[list, dict]:
+    """
+    Adaptively tile a tissue mask with rectangles, greedily placing
+    tiles in order of uncovered tissue density.
+
+    Each tile size is chosen independently in y and x within
+    [base_size * (1 - tolerance), base_size * (1 + tolerance)],
+    maximising the ratio of uncovered tissue pixels to tile area.
+
+    Parameters
+    ----------
+    a : np.ndarray
+        Full binary image array (used for shape reference).
+
+    tissue_mask : np.ndarray
+        2D boolean array, True = valid tissue.
+        Must be the same shape as a.
+
+    base_size : int
+        Base tile size in pixels.
+
+    size_tolerance : float
+        Fractional size tolerance. Tile height and width are each
+        independently chosen from:
+            [base_size * (1 - tolerance), base_size * (1 + tolerance)]
+
+    overlap_fraction : float
+        Maximum allowed overlap between adjacent tiles as a fraction
+        of base_size, on each edge.
+
+    min_tissue_fraction : float
+        Minimum fraction of tile area that must be tissue for a tile
+        to be accepted.
+
+    search_stride : int
+        Step size in pixels for the coarse candidate origin grid.
+        Smaller = more thorough but slower.
+
+    seed : int or None
+        Random seed for tiebreaking between equal-density candidates.
+
+    Returns
+    -------
+    windows : list of tuples
+        Each tuple: (sample_id, y0, y1, x0, x1)
+
+    report : dict
+        Placement summary including coverage statistics and warnings.
+    """
+
+    rng = np.random.default_rng(seed)
+    if tissue_mask.sum() > np.prod(tissue_mask.shape)/2:
+        tissue_mask = ~tissue_mask
+
+    if a.shape != tissue_mask.shape:
+        raise ValueError(
+            f"a.shape {a.shape} and tissue_mask.shape "
+            f"{tissue_mask.shape} must match."
+        )
+
+    h, w = a.shape
+
+    # --------------------------------------------------------
+    # Size ranges
+    # --------------------------------------------------------
+
+    s_min = max(1, int(np.floor(base_size * (1 - size_tolerance))))
+    s_max = int(np.ceil(base_size * (1 + size_tolerance)))
+    max_overlap_px = int(np.floor(overlap_fraction * base_size))
+
+    # Candidate sizes to try — sample a modest number to keep
+    # the search tractable. More sizes = better fit, slower search.
+    n_size_candidates = 8
+    size_candidates = np.unique(np.linspace(s_min, s_max, n_size_candidates, dtype=int))
+
+    # --------------------------------------------------------
+    # Coarse candidate origin grid
+    # --------------------------------------------------------
+
+    y_origins = np.arange(0, h - s_min + 1, search_stride)
+    x_origins = np.arange(0, w - s_min + 1, search_stride)
+
+    if len(y_origins) == 0 or len(x_origins) == 0:
+        report = {
+            'mode':                  'adaptive',
+            'placed':                0,
+            'tissue_coverage':       0.0,
+            'mean_tile_height':      None,
+            'mean_tile_width':       None,
+            'total_tissue_px':       int(tissue_mask.sum()),
+            'covered_tissue_px':     0,
+            'warning': (
+                f"base_size={base_size} is larger than the image "
+                f"({h}x{w}) — no tiles placed."
+            )
+        }
+        print(_format_report(report))
+        return [], report
+
+    # --------------------------------------------------------
+    # Uncovered tissue tracking
+    # --------------------------------------------------------
+
+    # Float mask so we can accumulate partial coverage tracking
+    uncovered = (tissue_mask).astype(np.float32).copy()
+    total_tissue_px = int(tissue_mask.sum())
+
+    if total_tissue_px == 0:
+        report = {
+            'mode':              'adaptive',
+            'placed':            0,
+            'tissue_coverage':   0.0,
+            'mean_tile_height':  None,
+            'mean_tile_width':   None,
+            'total_tissue_px':   0,
+            'covered_tissue_px': 0,
+            'warning':           "tissue_mask contains no True pixels."
+        }
+        print(_format_report(report))
+        return [], report
+
+    # --------------------------------------------------------
+    # Placed tile tracking (for overlap enforcement)
+    # --------------------------------------------------------
+
+    placed_tiles = []   # list of (y0, y1, x0, x1)
+    windows = []
+    sample_id = 0
+
+    # --------------------------------------------------------
+    # Greedy placement loop
+    # --------------------------------------------------------
+    covered_mask = np.zeros_like(tissue_mask, dtype=np.float32)
+    # max_jitter = max(1, search_stride // 4)
+    # jitter_y_table = rng.integers(0, max_jitter, size=(1000, len(y_origins)))
+    # jitter_x_table = rng.integers(0, max_jitter, size=(1000, len(x_origins)))
+    while True:
+
+        integral_tissue    = _integral_image(tissue_mask)
+        integral_uncovered = _integral_image(uncovered)
+
+        best_score = -1.0
+        best_tile  = None
+
+        # Shuffle origins slightly each pass for tiebreaking
+        jitter_y = rng.integers(0, max(1, search_stride // 4), size=len(y_origins))
+        jitter_x = rng.integers(0, max(1, search_stride // 4), size=len(x_origins))
+
+        try:
+            for iy, y0_base in enumerate(y_origins):
+                for ix, x0_base in enumerate(x_origins):
+
+                    y0 = int(np.clip(y0_base + jitter_y[iy], 0, h - s_min))
+                    x0 = int(np.clip(x0_base + jitter_x[ix], 0, w - s_min))
+
+                    # Quick check — is there any uncovered tissue near here?
+                    local_patch = uncovered[
+                        y0 : min(y0 + s_max, h),
+                        x0 : min(x0 + s_max, w)
+                    ]
+                    if local_patch.sum()/(np.prod(local_patch.shape)) <= 0.05:
+                        continue
+
+                    try:
+                        # Try all combinations of height and width candidates
+                        for sh in size_candidates:
+                            for sw in size_candidates:
+                                
+                                y1 = y0 + sh
+                                x1 = x0 + sw
+
+                                # Must fit within image
+                                if y1 > h or x1 > w:
+                                    continue
+
+                                integral_covered = _integral_image(covered_mask)
+
+                                tile_area         = sh * sw
+                                tissue_in_tile    = _rect_sum(integral_tissue,    y0, x0, y1, x1)
+                                uncovered_in_tile = _rect_sum(integral_uncovered, y0, x0, y1, x1)
+                                integral_tissue = _integral_image(tissue_mask.astype(np.float32))
+                                print(f"tissue_mask sum: {tissue_mask.sum()}")
+                                print(f"integral_tissue max: {integral_tissue.max()}")  # should match tissue_mask.sum()
+                                print(f"spot check: {_rect_sum(integral_tissue, 0, 0, h, w)}")  # should equal tissue_mask.sum()
+                                filled_frac = tissue_in_tile / tile_area
+                                
+                                # Sanity check on first origin
+                                y0_test = int(np.random.choice(y_origins))
+                                x0_test = int(np.random.choice(x_origins))
+                                y1_test = min(y0_test + base_size, h)
+                                x1_test = min(x0_test + base_size, w)
+
+                                print(f"Test tile: y={y0_test}:{y1_test}, x={x0_test}:{x1_test}")
+                                print(f"  tissue_in_tile  : {_rect_sum(integral_tissue,    y0_test, x0_test, y1_test, x1_test)}")
+                                print(f"  uncovered_in_tile: {_rect_sum(integral_uncovered, y0_test, x0_test, y1_test, x1_test)}")
+                                print(f"  tile_area       : {(y1_test - y0_test) * (x1_test - x0_test)}")
+                                print(f"  tissue fraction : {_rect_sum(integral_tissue, y0_test, x0_test, y1_test, x1_test) / ((y1_test-y0_test)*(x1_test-x0_test)):.4f}")
+
+                                print(f"tissue_mask fraction: {tissue_mask.mean():.4f}")
+                                print(f"y_origins range: {y_origins[0]} to {y_origins[-1]}, n={len(y_origins)}")
+                                print(f"x_origins range: {x_origins[0]} to {x_origins[-1]}, n={len(x_origins)}")
+                                
+                                if filled_frac < 0.05:
+                                    raise _SkipRegion
+                                elif filled_frac < min_tissue_fraction:
+                                    continue
+
+                                score = uncovered_in_tile / tile_area
+
+                                already_covered  = _rect_sum(integral_covered, y0, x0, y1, x1)
+                                tile_area        = sh * sw
+                                overlap_fraction_actual = already_covered / tile_area
+
+                                if overlap_fraction_actual > overlap_fraction:   # e.g. 0.05
+                                    continue
+
+                                if score > best_score:
+                                    best_score = score
+                                    best_tile  = (y0, y1, x0, x1)
+                                    if score > 0.8:
+                                        raise _TileAccepted
+                    
+                    except _SkipRegion:
+                        pass
+
+        except _TileAccepted:
+            pass
+
+        # No valid tile found — we're done
+        if best_tile is None:
+            break
+
+        y0, y1, x0, x1 = best_tile
+        covered_mask[y0:y1, x0:x1] = 1.0
+
+        # Mark tile region as covered
+        uncovered[y0:y1, x0:x1] = 0.0
+
+        placed_tiles.append(best_tile)
+        windows.append((sample_id, y0, y1, x0, x1))
+        sample_id += 1
+
+        # Stop if tissue is well covered
+        if uncovered.sum()/total_tissue_px <= 0.05:
+            break
+
+    # --------------------------------------------------------
+    # Report
+    # --------------------------------------------------------
+
+    covered_tissue_px = int(sum(
+        tissue_mask[y0:y1, x0:x1].sum()
+        for y0, y1, x0, x1 in placed_tiles
+    )) if placed_tiles else 0
+
+    # Recompute properly — union of all tile masks
+    coverage_mask = np.zeros_like(tissue_mask, dtype=bool)
+    for y0, y1, x0, x1 in placed_tiles:
+        coverage_mask[y0:y1, x0:x1] = True
+    covered_tissue_px = int((coverage_mask & tissue_mask).sum())
+
+    heights = [y1 - y0 for _, y0, y1, _, _ in [
+        (s, *t) for s, *t in windows
+    ]]
+    widths  = [x1 - x0 for _, _, _, x0, x1 in [
+        (s, *t) for s, *t in windows
+    ]]
+
+    tissue_coverage = covered_tissue_px / total_tissue_px
+
+    warnings = []
+    if tissue_coverage < 0.8:
+        warnings.append(
+            f"Only {tissue_coverage*100:.1f}% of tissue covered. "
+            f"Consider reducing search_stride, size_tolerance, or "
+            f"min_tissue_fraction."
+        )
+    if len(windows) == 0:
+        warnings.append(
+            "No tiles placed. Check that tissue_mask has sufficient "
+            "coverage and base_size is appropriate for the image size."
+        )
+
+    report = {
+        'mode':              'adaptive',
+        'placed':            len(windows),
+        'tissue_coverage':   round(tissue_coverage, 4),
+        'mean_tile_height':  round(np.mean(heights), 1) if heights else None,
+        'mean_tile_width':   round(np.mean(widths),  1) if widths  else None,
+        'total_tissue_px':   total_tissue_px,
+        'covered_tissue_px': covered_tissue_px,
+        'warning':           '; '.join(warnings) if warnings else None
+    }
+
+    print(_format_report(report))
+    return windows, report
+
+
+def _format_report(report: dict) -> str:
+    """
+    Format a window placement report dict for printing.
+    Shared between sample_windows and sample_windows_adaptive.
+    """
+    lines = [
+        "\n--- sample_windows report ---",
+        f"  Mode              : {report['mode']}",
+        f"  Placed            : {report['placed']}",
+    ]
+
+    if 'requested' in report and report['requested'] is not None:
+        lines.insert(2, f"  Requested         : {report['requested']}")
+
+    if report.get('tissue_coverage') is not None:
+        lines.append(
+            f"  Tissue coverage   : {report['tissue_coverage']*100:.1f}%"
+        )
+    if report.get('coverage_fraction') is not None:
+        lines.append(
+            f"  Image coverage    : {report['coverage_fraction']*100:.1f}%"
+        )
+    if report.get('mean_tile_height') is not None:
+        lines.append(
+            f"  Mean tile size    : "
+            f"{report['mean_tile_height']} x {report['mean_tile_width']} px"
+        )
+    if report.get('attempts_used') is not None:
+        lines.append(
+            f"  Attempts used     : "
+            f"{report['attempts_used']} / {report['max_attempts']}"
+        )
+    if report.get('total_tissue_px') is not None:
+        lines.append(
+            f"  Total tissue px   : {report['total_tissue_px']:,}"
+        )
+    if report.get('covered_tissue_px') is not None:
+        lines.append(
+            f"  Covered tissue px : {report['covered_tissue_px']:,}"
+        )
+    if report.get('warning'):
+        lines.append(f"WARNING         : {report['warning']}")
+
+    lines.append("-----------------------------\n")
+    return '\n'.join(lines)
+
 
 def connect_cells_to_neighbours(
     seed_mask: np.ndarray,
@@ -454,7 +855,11 @@ def hole_density_from_array_extended(
 
     image_folder: str = 'troubleshoot_images',
     resolution: float = 1.0, # Convert micrometre lengths to pixels
-    mode: str = 'whole_image'
+    mode: str = 'whole_image',
+
+    tissue_mask: np.ndarray = np.array(np.nan),
+    gfp: np.ndarray = np.array(np.nan),
+    dapi: np.ndarray = np.array(np.nan)
 ):
     """
     Compute porosity statistics from sparse GFP binary images.
@@ -483,7 +888,8 @@ def hole_density_from_array_extended(
     network_dilation_radius = network_dilation_radius * resolution
     min_cell_radius = min_cell_radius * resolution
 
-    dense_polygon_area = 400
+    dense_polygon_max_area = 400 # um^2
+    dense_polygon_max_length = 15 # um
 
     out_df = []
     blank_output = pd.DataFrame([{
@@ -496,7 +902,7 @@ def hole_density_from_array_extended(
             "mean_hole_area": np.nan,
             "largest_hole_area": np.nan,
             "std_hole_area": np.nan,
-            "cv_hole_area": np.nan,
+            # "cv_hole_area": np.nan,
             "n_cells": 0,
             "cell_density": np.nan,
             "mean_cell_area": np.nan
@@ -506,8 +912,10 @@ def hole_density_from_array_extended(
     if not os.path.exists(f'{image_folder}/{base_name}'):
         os.mkdir(f'{image_folder}/{base_name}')
 
+    # Crop or read in the mask file
     if mode == 'windows':
-        tissue_mask = io.imread(f"final tif files/{name.split('/')[-1].split('_sample')[0]}_roi.tif")
+        if np.isnan(tissue_mask).sum() > 0:
+            tissue_mask = io.imread(f"tissue masks/{name.split('/')[-1].split('_sample')[0].replace('_bin', '_mask')}.tif")
         tissue_mask = tissue_mask[yrange[0]:yrange[1]].T[xrange[0]:xrange[1]].T.astype(bool) # This has to be in pixels
         fig, ax = plt.subplots()
         ax.imshow(~tissue_mask, cmap='binary')
@@ -515,17 +923,65 @@ def hole_density_from_array_extended(
         ax.set_xlabel('X / um')
         ax.set_ylabel('Y / um')
 
-        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.2f}'))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.2f}'))
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
 
-        plt.savefig(f'{image_folder}/{base_name}/' + name + f'_tissue_mask_segment.png', bbox_inches='tight')
+        plt.savefig(f'{image_folder}/{base_name}/' + name + f'_tissue_mask_window_{xrange[1]}.png', bbox_inches='tight')
         plt.close(fig)
         if (~tissue_mask).sum()/np.prod(tissue_mask.shape) < min_tissue_area_frac:
             print(f'Skipped as region <{round(100*min_tissue_area_frac)}% occupied by tissue')
             return blank_output
     else:
-        tissue_mask = io.imread(f"final tif files/{name.split('/')[-1][:-4]}_roi.tif").astype(bool)
+        tissue_mask = io.imread(f"tissue masks/{name.split('/')[-1][:-4].replace('_bin', '_mask')}.tif").astype(bool)
     print('.', end='', flush=True)
+
+
+    # Read in the original GFP/cxcl12 file
+    if mode == 'windows':
+        if np.isnan(gfp).sum() > 0:
+            gfp = io.imread(f"originals/{name.split('/')[-1].split('_sample')[0].replace('_bin', '_cxcl12')}.tif")
+        gfp = gfp[yrange[0]:yrange[1]].T[xrange[0]:xrange[1]].T # This has to be in pixels
+        fig, ax = plt.subplots()
+        ax.imshow(gfp, black_to_green)
+        ax.set_title(f'{name} original GFP image')
+        ax.set_xlabel('X / um')
+        ax.set_ylabel('Y / um')
+
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
+
+        plt.savefig(f'{image_folder}/{base_name}/' + name + f'_gfp_window_{xrange[1]}.png', bbox_inches='tight')
+        plt.close(fig)
+    else:
+        gfp = io.imread(f"final tif files/{name.split('/')[-1][:-4].replace('_bin', '_mask')}.tif").astype(bool)
+    print('.', end='', flush=True)
+    del(gfp)
+
+
+    # Read in the original dapi file
+    try:
+        if mode == 'windows':
+            if np.isnan(dapi).sum() > 0:
+                dapi = io.imread(f"originals/{name.split('/')[-1].split('_sample')[0].replace('_bin', '_dapi')}.tif")
+            dapi = dapi[yrange[0]:yrange[1]].T[xrange[0]:xrange[1]].T # This has to be in pixels
+            fig, ax = plt.subplots()
+            ax.imshow(dapi, black_to_blue)
+            ax.set_title(f'{name} original DAPI image')
+            ax.set_xlabel('X / um')
+            ax.set_ylabel('Y / um')
+
+            ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+            ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
+
+            plt.savefig(f'{image_folder}/{base_name}/' + name + f'_dapi_window_{xrange[1]}.png', bbox_inches='tight')
+            plt.close(fig)
+        else:
+            dapi = io.imread(f"originals/{name.split('/')[-1][:-4].replace('_bin', '_mask')}.tif").astype(bool)
+        print('.', end='', flush=True)
+    except:
+        print('\nDAPI file not found, proceeding to next step.')
+    # del(dapi) # Suppressing this for measuring non-parenchyma later
+
     # ========================================================
     # PIXEL SCALING
     # ========================================================
@@ -536,7 +992,7 @@ def hole_density_from_array_extended(
     # pixel_area = dx * dy
 
     # ========================================================
-    # GFP-POSITIVE PIXELS
+    # GFP-POSITIVE PIXELS ABOVE THRESHOLD
     # ========================================================
 
     a = ~(a.astype(bool))
@@ -573,12 +1029,12 @@ def hole_density_from_array_extended(
 
     fig, ax = plt.subplots()
     ax.imshow(seed_mask, cmap='binary')
-    ax.set_title(f'{name} gfp mask')
+    ax.set_title(f'{name} gfp binary')
     ax.set_xlabel('X / um')
     ax.set_ylabel('Y / um')
 
-    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.2f}'))
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.2f}'))
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
 
     plt.savefig(f'{image_folder}/{base_name}/' + name + f'_seed_mask_{locale_pixel_radius}.png', bbox_inches='tight')
     plt.close(fig)
@@ -602,8 +1058,8 @@ def hole_density_from_array_extended(
     ax.set_xlabel('X / um')
     ax.set_ylabel('Y / um')
 
-    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.2f}'))
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.2f}'))
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
 
     plt.savefig(f'{image_folder}/{base_name}/' + name + f'_seed_mask_noiseless_{round(min_cell_radius/resolution,1)}.png', bbox_inches='tight')
     plt.close(fig)
@@ -624,8 +1080,8 @@ def hole_density_from_array_extended(
     ax.set_xlabel('X / um')
     ax.set_ylabel('Y / um')
 
-    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.2f}'))
-    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.2f}'))
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
 
     plt.savefig(f'{image_folder}/{base_name}/' + name + f'_seed_mask_expanded_cells_{round(cell_dilation_radius/resolution,1)}.png', bbox_inches='tight')
     plt.close(fig)
@@ -654,7 +1110,7 @@ def hole_density_from_array_extended(
 
     pixel_area = resolution**-2 # Square micrometres per pixel
 
-    tissue_area = np.sum(tissue_mask) * pixel_area
+    tissue_area = np.sum(~tissue_mask) * pixel_area
 
     cell_density = (
         n_cells / tissue_area
@@ -672,11 +1128,11 @@ def hole_density_from_array_extended(
     # Draw lines between cells and their 5 nearest neighbours
     # ========================================================
     network_masks = [np.array(np.nan), np.nan, np.nan, np.nan, np.nan]
-    for i, max_dist in enumerate(np.array([10, 30, 50, 100, 150])*resolution):
+    for i, max_dist in enumerate(np.array([50])*resolution):
         network_masks[i], avg_connections = connect_cells_to_neighbours(
             ~seed_mask,
             k=6, # In a close-packed 2D setting, this covers the nearest neighbours
-            max_distance=max_dist*resolution, # Conversion from 150um to pixels
+            max_distance=max_dist*resolution, # Conversion from um to pixels
             window_border_distance=None
         )
         # Remove connections which extend across holes in the tissue marked on the roi file
@@ -693,8 +1149,8 @@ def hole_density_from_array_extended(
         ax.set_xlabel('X / um')
         ax.set_ylabel('Y / um')
 
-        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.2f}'))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.2f}'))
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
 
         plt.savefig(f'{image_folder}/{base_name}/' + name + f'_network_mask_{max_dist}_{round(network_dilation_radius,1)}.png', bbox_inches='tight')
         plt.close(fig)
@@ -716,13 +1172,25 @@ def hole_density_from_array_extended(
         )
 
         holes = 0
+        n_high_dens = 0
+        n_low_dens = 0
+        n_discounted_regions = 0
+        n_bg_regions = 0
+        area_high_dens = 0
+        area_low_dens = 0
         hole_area_pixels = 0
+        area_discounted = 0
+        bg_area = 0
 
         current_label = 1
 
         for i in range(1, n_components + 1):
 
             component = (labelled_holes == i)
+            n_pixels = component.sum()
+            if n_pixels < 10: # Discard tiny regions from counting
+                colour_map[component] = 0
+                continue
 
             touches_edge = (
                 component[0, :].any() or
@@ -731,24 +1199,38 @@ def hole_density_from_array_extended(
                 component[:, -1].any()
             )
 
-            n_pixels = component.sum()
+            locs = np.where(component)
+            approx_l = np.sqrt((locs[0][-1]-locs[0][0])**2 + (locs[1][-1]-locs[1][0])**2) # Assuming a triangle with two similarly long sides. Will only matter for small shapes, which will be not too far from this
 
             if touches_edge:
                 colour_map[component] = 0                      # grey - edge-touching
-            elif n_pixels < dense_polygon_area * resolution**2:
+                n_bg_regions += 1
+                bg_area += n_pixels
+            elif n_pixels < dense_polygon_max_area * resolution**2:
                 colour_map[component] = 1                      # blue - usual spacing in dense clusters
-            elif n_pixels < min_hole_area * resolution**2 and n_pixels > dense_polygon_area * resolution**2:
-                colour_map[component] = 2
+                n_high_dens += 1
+                area_high_dens += n_pixels
+            elif n_pixels < min_hole_area * resolution**2 and n_pixels > (dense_polygon_max_area * resolution**2 or approx_l > dense_polygon_max_length * resolution):
+                colour_map[component] = 2                      # light blue - sub-dense regions
+                n_low_dens += 1
+                area_low_dens += n_pixels
             elif n_pixels > max_hole_area * resolution**2:
                 colour_map[component] = 4                      # red - too large, probably a different tissue e.g. trabecular bone or blood vessel
+                n_discounted_regions += 1
+                area_discounted += n_pixels
             else:
-                colour_map[component] = 3                      # green - a genuine gap in the target cells where they should be under equal distribution assumptions
-                retained_holes[component] = current_label
-                current_label += 1
-                holes += 1
-                hole_area_pixels += n_pixels
+                if dapi[component].mean() > 3000: # Parenchymal tissue but a CXCL12-GFP gap still
+                    colour_map[component] = 3                      # green - a genuine gap in the target cells where they should be under equal distribution assumptions
+                    retained_holes[component] = current_label
+                    current_label += 1
+                    holes += 1
+                    hole_area_pixels += n_pixels
+                else: # Non-parenchymal (maybe - see femur 3 for examples of large regions of low DAPI but high CXCL12-GFP)
+                    colour_map[component] = 4
+                    n_discounted_regions += 1
+                    area_discounted += n_pixels
 
-        # --- Colourmap: black, green, blue, red, grey ---
+
         cmap = colors.ListedColormap(
             ['lightgrey', 'steelblue', 'lightblue', 'limegreen', 'tomato']
         )
@@ -771,11 +1253,11 @@ def hole_density_from_array_extended(
         ax.set_xlabel('X / um')
         ax.set_ylabel('Y / um')
 
-        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.2f}'))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.2f}'))
+        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
 
         plt.savefig(
-            f'{image_folder}/{base_name}/' + name + f'_labelled_holes_{max_dist}_{min_hole_area}_{dense_polygon_area}.png',
+            f'{image_folder}/{base_name}/' + name + f'_labelled_holes_{max_dist}_{min_hole_area}_{dense_polygon_max_area}.png',
             bbox_inches='tight'
         )
         plt.close(fig)
@@ -792,6 +1274,8 @@ def hole_density_from_array_extended(
         hole_sizes_scaled = hole_sizes * pixel_area
 
         hole_area = hole_area_pixels * pixel_area
+
+        tissue_area = tissue_area - area_discounted * pixel_area # Remove sum of red region pixels
 
         hole_fraction = (
             hole_area /
@@ -841,11 +1325,22 @@ def hole_density_from_array_extended(
             # "cv_hole_area": cv_hole_area,
             "average_connections_per_cell": avg_connections,
 
-            # tissue statistics
+            # cxcl12 stromal cell statistics
             "filled_area": tissue_area,
             "n_cells": int(n_cells),
             "cell_density": cell_density,
             "mean_cell_area": mean_cell_area,
+
+            # tissue statistics
+            "high_density_polygons": n_high_dens,
+            "low_density_polygons": n_low_dens,
+            "high_density_area": area_high_dens / resolution**2,
+            "low_density_area": area_low_dens / resolution**2,
+            "ratio_high_low": area_high_dens/area_low_dens,
+            "n_discounted_regions": n_discounted_regions,
+            "area_discounted": area_discounted / resolution**2,
+            "background_regions": n_bg_regions,
+            "background_area": bg_area / resolution**2,
 
             # optional debugging output
             # "tissue_mask": tissue_mask,
@@ -878,13 +1373,13 @@ def analyse_image(
             file_name=filename,
             locale_pixel_radius=5,
             min_seed_pixels=20,
-            cell_dilation_radius=4.0,
+            cell_dilation_radius=2.0,
             network_dilation_radius=0.5,
             min_tissue_area_frac=0.4,
-            min_hole_area=4000, # Trying to remove normal spacing from counts of holes
-            max_hole_area=1E5,
+            min_hole_area=3E4, # Trying to remove normal spacing from counts of holes
+            max_hole_area=3E5, # Try to remove any tissue tears or interrupting other tissues e.g. bone from the analysis
             min_cell_size=50,
-            min_cell_radius=2.0,
+            min_cell_radius=1.5,
             image_folder=image_folder,
             resolution=resolution,
         )
@@ -935,16 +1430,34 @@ def analyse_resampled_windows(
     results = []
     print(f'Taking up to {n_samples} windows.')
     window_ids = [i for i in range(1, n_samples+1)]
+    mask = io.imread('tissue masks/' + file_name.replace('_bin', '_mask'))
+    gfp = io.imread('originals/' + file_name.replace('_bin', '_cxcl12'))
+    try:
+        dapi = io.imread('originals/' + file_name.replace('_bin', '_dapi'))
+    except:
+        dapi = np.array(np.nan)
     while len(results) < n_samples:
-        windows, warnings = sample_windows_modes(
-            a,
-            window_size,
-            n_samples,
-            mode=window_mode,
-            window_ids=copy.copy(window_ids),
-            overlap_fraction=0.1
-        )
         if window_mode == 'tiled':
+            windows, report = sample_windows_modes(
+                a,
+                window_size,
+                n_samples,
+                mode=window_mode,
+                window_ids=copy.copy(window_ids),
+                overlap_fraction=0.1
+            )
+        elif window_mode == 'greedy':
+            windows, report = sample_windows_adaptive(
+                a            = image,
+                tissue_mask  = mask.astype(bool),
+                base_size    = 1400,
+                size_tolerance   = 0.3,
+                overlap_fraction = 0.05,
+                min_tissue_fraction = 0.3,
+                search_stride    = 100,
+                seed             = 42
+            )
+        if window_mode == 'tiled' or 'greedy':
             n_samples = len(windows)
             window_ids = [i for i in range(1, n_samples+1)]
 
@@ -972,7 +1485,10 @@ def analyse_resampled_windows(
                 min_cell_radius=min_cell_radius,
                 image_folder=image_folder,
                 resolution=resolution,
-                mode='windows'
+                mode='windows',
+                tissue_mask=mask,
+                gfp=gfp,
+                dapi=dapi
             )
 
             if len(out_df) == 0:
@@ -997,31 +1513,57 @@ Image.MAX_IMAGE_PIXELS = 933120000
 import warnings
 
 if __name__ == '__main__':
-    target_directory = Folder('mask tif files from Clara')
-    specific_files = []
+    target_directory = Folder('binaries')
+    tile_size_lookup = {
+        'M1femur_bin.tif': 1400,
+        'M1hip_bin.tif': 750,
+        'M2femur_bin.tif': 1600,
+        'M2hip_bin.tif': 700,
+        'M3femur_bin.tif': 1650,
+        'M3hip_bin.tif': 850,
+        'M4femur_bin.tif': 1550,
+        'M4hip_bin.tif': 700,
+        'M5femur_bin.tif': 1350,
+        'M5hip_bin.tif': 800,
+    }
+    specific_files = tile_size_lookup.keys()
     hold_list = []
     for file in target_directory.files:
         if file.type == 'tif':
             if file.name.split('_')[-1] == 'bin.tif' and not file.name in hold_list and (file.name in specific_files if len(specific_files) > 0 else True):
+                print(f'Opening {file.name}...')
                 image = io.imread(file.path)
-                with Image.open(file.path) as img:
-                    meta_dict = {TAGS[key] : img.tag[key] for key in img.tag.keys()}
-                    resolution = float(img.tag_v2.get(282))  # 282 = XResolution tag, returns a clean float
-                    if resolution != float(img.tag_v2.get(283)):
-                        raise ValueError('Axes not set equal in Tif image.')
-                del(img)
-                if not 'micron' in meta_dict['ImageDescription'][0]:
-                    warnings.warn("Warning - image length not in units of Micrometres.")
+                try:
+                    with Image.open(file.path) as img:
+                        meta_dict = {TAGS[key] : img.tag[key] for key in img.tag.keys()}
+                        resolution = float(img.tag_v2.get(282))  # 282 = XResolution tag, returns a clean float
+                        if resolution != float(img.tag_v2.get(283)):
+                            raise ValueError('Axes not set equal in Tif image.')
+                    del(img)
+                    if not 'micron' in meta_dict['ImageDescription'][0]:
+                        warnings.warn("Warning - image length not in units of Micrometres.")
+                except: # Get metadata from mask instead of binary if there is an issue with the binary
+                    print('Taking metadata from roi instead of binary...')
+                    with Image.open(file.path.replace('binaries', 'tissue masks').replace('_bin', '_mask')) as img:
+                        meta_dict = {TAGS[key] : img.tag[key] for key in img.tag.keys()}
+                        resolution = float(img.tag_v2.get(282))  # 282 = XResolution tag, returns a clean float
+                        if resolution != float(img.tag_v2.get(283)):
+                            raise ValueError('Axes not set equal in Tif image.')
+                    del(img)
+                    if not 'micron' in meta_dict['ImageDescription'][0]:
+                        warnings.warn("Warning - image length not in units of Micrometres.")
+
                 print('Analysing ' + file.name + ':')
+                window_mode = 'tiled'
                 df = analyse_image(
                     a=image,
                     xrange=(0, image.shape[1]),
                     yrange=(0, image.shape[0]),
-                    window_mode='tiled', # Process full image or not - full image is usually too big! put None for full image.
+                    window_mode=window_mode, # Process full image or not - full image is usually too big! put None for full image.
                     filename=file.name,
                     image_folder='troubleshoot_images',
                     resolution=resolution,
-                    window_size=1400,
-                    n_samples=30,
+                    window_size=tile_size_lookup[file.name],
+                    n_samples=50,
                 )
-                df.dropna().to_csv(file.path[:-4] + '_resampled_analysed.csv')
+                df.dropna().to_csv('data/' + file.name[:-4].replace('bin', 'results') + f'_{window_mode}.csv')

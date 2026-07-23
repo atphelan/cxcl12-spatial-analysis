@@ -64,9 +64,12 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
     if metrics is None:
         metrics = [
-            'n_holes', 'hole_density', 'hole_area', 'hole_coverage',
+            'hole_density', 'hole_coverage', 'hole_area',
             'mean_hole_area', 'std_hole_area',
-            'filled_area', 'n_cells', 'cell_density',
+            'cell_density', 'adjusted_cell_density',
+            'fraction_high_density_tissue', 'fraction_low_density_tissue',
+            'adjusted_fraction_high_density_tissue', 'adjusted_fraction_low_density_tissue',
+            'tissue_area', 'filled_area', 'high_density_area', 'low_density_area'
         ]
 
     # --------------------------------------------------------
@@ -78,12 +81,14 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
     for file in target_directory.files:
         if file.type != 'csv':
             continue
-        if 'analysed' not in file.path:
-            continue
-        if 'dilate' in file.name:
-            continue
 
         df = pd.read_csv(file.path)
+        df['fraction_high_density_tissue'] = df['high_density_area']/df['filled_area']
+        df['fraction_low_density_tissue'] = df['low_density_area']/df['filled_area']
+        df['adjusted_fraction_high_density_tissue'] = df['high_density_area']/(df['filled_area'])
+        df['adjusted_fraction_low_density_tissue'] = df['low_density_area']/(df['filled_area'])
+        df['tissue_area'] = df['fraction_high_density_tissue'] + df['fraction_low_density_tissue'] + df['hole_area']
+        df['adjusted_cell_density'] = df['n_cells']/(df['tissue_area']-df['hole_area'])
 
         if len(df) < min_windows:
             print(f"  [WARN] {file.name}: only {len(df)} windows — skipping (min={min_windows})")
@@ -98,7 +103,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
         }
 
     if not image_means:
-        raise ValueError("No valid files found. Check target_directory and file naming.")
+        raise ValueError("No valid files found. Check target directory and file naming.")
 
     # --------------------------------------------------------
     # Build matched hip / femur pairs
@@ -228,7 +233,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
     return results_df
 
 if __name__ == '__main__':
-    target_directory = Folder('mask tif files from Clara')
+    target_directory = Folder('data')
     # analyse_files(target_directory)
     # make_summary_table_10images(target_directory)
     run_paired_statistics(target_directory)
