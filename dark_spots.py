@@ -1516,7 +1516,7 @@ if __name__ == '__main__':
     target_directory = Folder('binaries')
     tile_size_lookup = {
         'M1femur_bin.tif': 1400,
-        'M1hip_bin.tif': 750,
+        'M1hip_bin.tif': 650, # eroded this 1 step and lowered window size - only 3 windows went through successfully before and density was estimated high, using a lot of background
         'M2femur_bin.tif': 1600,
         'M2hip_bin.tif': 700,
         'M3femur_bin.tif': 1650,
@@ -1526,7 +1526,7 @@ if __name__ == '__main__':
         'M5femur_bin.tif': 1350,
         'M5hip_bin.tif': 800,
     }
-    specific_files = tile_size_lookup.keys()
+    specific_files = ['M1hip_bin.tif'] #tile_size_lookup.keys()
     hold_list = []
     for file in target_directory.files:
         if file.type == 'tif':

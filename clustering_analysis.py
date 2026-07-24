@@ -64,12 +64,9 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
     if metrics is None:
         metrics = [
-            'hole_density', 'hole_coverage', 'hole_area',
-            'mean_hole_area', 'std_hole_area',
-            'cell_density', 'adjusted_cell_density',
-            'fraction_high_density_tissue', 'fraction_low_density_tissue',
-            'adjusted_fraction_high_density_tissue', 'adjusted_fraction_low_density_tissue',
-            'tissue_area', 'filled_area', 'high_density_area', 'low_density_area'
+            'mean_hole_area', 'std_hole_area', 'cell_density',
+            'frac_high_density_tissue', 'frac_low_density_tissue', 
+            'frac_gap_tissue', 'ratio_high_low'
         ]
 
     # --------------------------------------------------------
@@ -83,12 +80,15 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
             continue
 
         df = pd.read_csv(file.path)
-        df['fraction_high_density_tissue'] = df['high_density_area']/df['filled_area']
-        df['fraction_low_density_tissue'] = df['low_density_area']/df['filled_area']
-        df['adjusted_fraction_high_density_tissue'] = df['high_density_area']/(df['filled_area'])
-        df['adjusted_fraction_low_density_tissue'] = df['low_density_area']/(df['filled_area'])
-        df['tissue_area'] = df['fraction_high_density_tissue'] + df['fraction_low_density_tissue'] + df['hole_area']
-        df['adjusted_cell_density'] = df['n_cells']/(df['tissue_area']-df['hole_area'])
+
+        df['tissue_area'] = df['high_density_area'] + df['low_density_area'] + df['hole_area']
+        df['frac_high_density_tissue'] = df['high_density_area']/df['tissue_area']
+        df['frac_low_density_tissue'] = df['low_density_area']/df['tissue_area']
+        df['frac_gap_tissue'] = df['hole_area']/df['tissue_area']
+        # df['adjusted_fraction_high_density_tissue'] = df['high_density_area']/(df['filled_area'])
+        # df['adjusted_fraction_low_density_tissue'] = df['low_density_area']/(df['filled_area'])
+        
+        # df['adjusted_cell_density'] = df['n_cells']/(df['tissue_area']-df['hole_area'])
 
         if len(df) < min_windows:
             print(f"  [WARN] {file.name}: only {len(df)} windows — skipping (min={min_windows})")
@@ -227,7 +227,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
         )
 
     print(f"{'='*70}")
-    print("Significance: * p<0.05   ** p<0.01   *** p<0.001   ns = not significant")
+    print("Significance: * p<0.05   ** p<0.01   *** p<0.001   ns = not significant under this test")
     print("Note: Shapiro-Wilk has low power at small n — consider Wilcoxon as default.\n")
 
     return results_df

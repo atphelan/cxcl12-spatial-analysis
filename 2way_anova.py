@@ -1,7 +1,10 @@
 import numpy as np 
 import pandas as pd
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
+
 from statsmodels.formula.api import ols
+from scipy.stats import f_oneway
 
 from utils import Folder
 
@@ -64,16 +67,50 @@ from utils import Folder
 # print("Hole coverage ANOVA results dilated 10x")
 # print(anova_result2) # If eta_sq << 1, not much difference explained. Go for 0.1+.
 
-def aggregate_and_analyse_resampling_files(target_directory):
+def aggregate_and_analyse_resampling_files(target_directory, dependent):
     target_directory = Folder(target_directory)
     df_list = []
     for file in target_directory.files:
-        if file.type == 'csv' and 'resampled_analysed' in file.name and not 'dilate' in file.name:
+        if file.type == 'csv':
             df = file.read()
-            df['source'] = file.name
-            df['bone_type'] = df['source'].apply('Not a function yet')
+            df['mouse'] = df['name'].apply(lambda name: name[0:2])
+            df['bone'] = df['name'].apply(lambda name: name.split('_')[0][2:])
             df_list.append(df.copy())
+            # df_list.append(pd.DataFrame([{'mouse': df['mouse'].iloc[0], 'bone': df['bone'].iloc[0], dependent: (df[dependent]*df['filled_area']).sum()/df['filled_area'].sum()}]))
     final_df = pd.concat(df_list)
-    final_df.to_csv(target_directory + '2way_anova.csv')
+    aggregated = final_df.groupby(['mouse', 'bone']).apply(
+        lambda g: pd.Series({
+            dependent: (g[dependent] * g['filled_area']).sum() / g['filled_area'].sum(),
+            'n_windows': len(g)
+        })
+    ).reset_index()
 
-aggregate_and_analyse_resampling_files('mask tif files from Clara')
+
+    final_df['image_id'] = final_df['mouse'] + '_' + final_df['bone']
+
+
+
+    lmm = smf.mixedlm(
+        f'{dependent} ~ C(bone)',
+        data=final_df,
+        groups=final_df['image_id'],
+    )
+    result = lmm.fit()
+    print('Results: fitted parameters')
+    print(result.params)
+    print('')
+
+    print('Results: confidence intervals')
+    print(result.conf_int())
+    print('')
+
+    # Direction of hip vs femur per mouse
+    print('Percentage differences per mouse:')
+    for mouse in ['M1','M2','M3','M4','M5']:
+        sub = aggregated[aggregated['mouse'] == mouse]
+        hip   = sub[sub['bone'] == 'hip'][dependent].values[0]
+        femur = sub[sub['bone'] == 'femur'][dependent].values[0]
+        direction = 'hip > femur' if hip > femur else 'femur > hip'
+        print(f"{mouse}: {direction} ({abs(hip-femur)/femur*100:.1f}% difference)")
+
+aggregate_and_analyse_resampling_files('data', 'cell_density')
