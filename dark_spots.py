@@ -829,6 +829,76 @@ def connect_cells_to_neighbours(
 
     return graph_mask, connections_made/len(centroids)
 
+def classify_polygon(
+    polygon_mask: np.ndarray,    # boolean mask of the polygon region
+    dapi_image: np.ndarray,      # raw DAPI fluorescence image
+    area_px: float,
+    pixel_area: float,           # µm² per pixel
+    a_min: float   = 200,        # µm² — noise floor
+    a_mid: float   = 2000,       # µm² — small/large boundary
+    dapi_threshold: float = None # if None, computed from data
+) -> str:
+    """
+    Returns one of:
+        'noise'          — below minimum area
+        'dense_patch'    — small, high DAPI
+        'true_hole'      — small, low DAPI
+        'sparse_region'  — large, high DAPI
+        'interruption'   — large, low DAPI
+    """
+
+    area_um2 = area_px * pixel_area
+
+    if area_um2 < a_min:
+        return 'noise'
+
+    mean_dapi = dapi_image[polygon_mask].mean()
+
+    # Threshold determined empirically — see compute_dapi_threshold()
+    is_low_dapi = mean_dapi < dapi_threshold
+
+    if area_um2 < a_mid:
+        return 'true_hole'      if is_low_dapi else 'dense_patch'
+    else:
+        return 'interruption'   if is_low_dapi else 'sparse_region'
+
+
+def compute_dapi_threshold(
+    dapi_image: np.ndarray,
+    polygon_masks: list,         # list of boolean arrays
+    method: str = 'valley'       # 'valley' | 'percentile'
+) -> float:
+    """
+    Compute a DAPI threshold from the distribution of
+    per-polygon mean DAPI values.
+    """
+    mean_dapis = np.array([
+        dapi_image[mask].mean()
+        for mask in polygon_masks
+    ])
+
+    if method == 'valley':
+        # Look for bimodal valley using a histogram
+        from scipy.signal import find_peaks
+        counts, edges = np.histogram(mean_dapis, bins=50)
+        centers = (edges[:-1] + edges[1:]) / 2
+
+        # Find valleys (minima between peaks)
+        valleys, _ = find_peaks(-counts)
+
+        if len(valleys) > 0:
+            # Use the first valley as threshold
+            threshold = centers[valleys[0]]
+        else:
+            # Fall back to percentile if no clear valley
+            print("  [WARN] No bimodal valley found — falling back to 20th percentile.")
+            threshold = np.percentile(mean_dapis, 20)
+
+    elif method == 'percentile':
+        threshold = np.percentile(mean_dapis, 20)
+
+    return threshold
+
 def hole_density_from_array_extended(
     a: np.ndarray, # Binary file of an image, normalisation not necessary. Everything nonzero is converted to 1.
     name: str, # Base name to save troubleshooting images and final CSV data with
@@ -888,8 +958,10 @@ def hole_density_from_array_extended(
     network_dilation_radius = network_dilation_radius * resolution
     min_cell_radius = min_cell_radius * resolution
 
-    dense_polygon_max_area = 400 # um^2
-    dense_polygon_max_length = 15 # um
+    dense_polygon_max_area = 500 * resolution**2 # px
+    dense_polygon_max_length = 30 * resolution # px, Gomariz et al. 2018 usual shortest length between CXCL12 cells
+    min_hole_area *= resolution**2
+    max_hole_area *= resolution**2
 
     out_df = []
     blank_output = pd.DataFrame([{
@@ -955,7 +1027,7 @@ def hole_density_from_array_extended(
     else:
         gfp = io.imread(f"final tif files/{name.split('/')[-1][:-4].replace('_bin', '_mask')}.tif").astype(bool)
     print('.', end='', flush=True)
-    del(gfp)
+    # del(gfp)
 
 
     # Read in the original dapi file
@@ -1165,6 +1237,7 @@ def hole_density_from_array_extended(
         # ========================================================
 
         colour_map = np.zeros(labelled_holes.shape, dtype=np.uint8)
+        colour_map[np.where(network_masks[i] == 0)] = 4
 
         retained_holes = np.zeros_like(
             labelled_holes,
@@ -1188,8 +1261,8 @@ def hole_density_from_array_extended(
 
             component = (labelled_holes == i)
             n_pixels = component.sum()
-            if n_pixels < 10: # Discard tiny regions from counting
-                colour_map[component] = 0
+            if n_pixels < 10: # Discard tiny regions from counting, but show
+                colour_map[component] = 4
                 continue
 
             touches_edge = (
@@ -1206,33 +1279,32 @@ def hole_density_from_array_extended(
                 colour_map[component] = 0                      # grey - edge-touching
                 n_bg_regions += 1
                 bg_area += n_pixels
-            elif n_pixels < dense_polygon_max_area * resolution**2:
-                colour_map[component] = 1                      # blue - usual spacing in dense clusters
-                n_high_dens += 1
-                area_high_dens += n_pixels
-            elif n_pixels < min_hole_area * resolution**2 and n_pixels > (dense_polygon_max_area * resolution**2 or approx_l > dense_polygon_max_length * resolution):
-                colour_map[component] = 2                      # light blue - sub-dense regions
-                n_low_dens += 1
-                area_low_dens += n_pixels
-            elif n_pixels > max_hole_area * resolution**2:
+            elif dapi[component].mean() < 0.1*dapi.mean() or n_pixels > max_hole_area:
                 colour_map[component] = 4                      # red - too large, probably a different tissue e.g. trabecular bone or blood vessel
                 n_discounted_regions += 1
                 area_discounted += n_pixels
-            else:
-                if dapi[component].mean() > 3000: # Parenchymal tissue but a CXCL12-GFP gap still
-                    colour_map[component] = 3                      # green - a genuine gap in the target cells where they should be under equal distribution assumptions
+            elif n_pixels < dense_polygon_max_area and approx_l < dense_polygon_max_length:
+                colour_map[component] = 1                      # blue - usual spacing in dense clusters
+                n_high_dens += 1
+                area_high_dens += n_pixels
+            elif gfp[component].mean() < 0.85*gfp.mean() and n_pixels > min_hole_area: # Non-parenchymal, a hole
+                    colour_map[component] = 3                      # green - non-parenchymal tissues 
                     retained_holes[component] = current_label
                     current_label += 1
                     holes += 1
                     hole_area_pixels += n_pixels
-                else: # Non-parenchymal (maybe - see femur 3 for examples of large regions of low DAPI but high CXCL12-GFP)
-                    colour_map[component] = 4
-                    n_discounted_regions += 1
-                    area_discounted += n_pixels
+            elif n_pixels < min_hole_area and (n_pixels > dense_polygon_max_area or approx_l > dense_polygon_max_length):
+                colour_map[component] = 2                      # light blue - sub-dense regions
+                n_low_dens += 1
+                area_low_dens += n_pixels
+            else: # Large polygon but still valid tissue
+                colour_map[component] = 2
+                n_discounted_regions += 1
+                area_discounted += n_pixels
 
 
         cmap = colors.ListedColormap(
-            ['lightgrey', 'steelblue', 'lightblue', 'limegreen', 'tomato']
+            ['lightgrey', 'steelblue', 'lightblue', 'limegreen', 'grey']
         )
         bounds = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
         norm = colors.BoundaryNorm(bounds, cmap.N)
@@ -1243,9 +1315,9 @@ def hole_density_from_array_extended(
         cbar = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3, 4])
         cbar.ax.set_yticklabels([
             'Background', #1
-            'Typical dense patch', #2
-            'Typical semi-dense patch', #3
-            'Significant CXCL12 gap', #4
+            'Dense CXCL12 region', #2
+            'Sparse CXCL12 region', #3
+            'Expected non-parenchyma', #4
             'Other tissues', #5
         ])
 
@@ -1376,14 +1448,14 @@ def analyse_image(
             cell_dilation_radius=2.0,
             network_dilation_radius=0.5,
             min_tissue_area_frac=0.4,
-            min_hole_area=3E4, # Trying to remove normal spacing from counts of holes
-            max_hole_area=3E5, # Try to remove any tissue tears or interrupting other tissues e.g. bone from the analysis
+            min_hole_area=2500, # Trying to remove dense spacing from counts of holes
+            max_hole_area=1E5, # Try to remove any tissue tears or interrupting other tissues e.g. bone from the analysis
             min_cell_size=50,
             min_cell_radius=1.5,
             image_folder=image_folder,
             resolution=resolution,
         )
-    elif window_mode is None:
+    # elif window_mode is None:
         return pd.DataFrame([
             hole_density_from_array_extended(
                 a,
@@ -1395,7 +1467,7 @@ def analyse_image(
                 cell_dilation_radius=2.0,
                 network_dilation_radius=0.5,
                 min_tissue_area_frac=0.1, # Doesn't really matter, keep it kinda low for whole images
-                min_hole_area=4000,
+                min_hole_area=1000,
                 max_hole_area=1E5,
                 min_cell_size=10,
                 min_cell_radius=2.0,
@@ -1515,19 +1587,19 @@ import warnings
 if __name__ == '__main__':
     target_directory = Folder('binaries')
     tile_size_lookup = {
-        'M1femur_bin.tif': 1400,
-        'M1hip_bin.tif': 650, # eroded this 1 step and lowered window size - only 3 windows went through successfully before and density was estimated high, using a lot of background
-        'M2femur_bin.tif': 1600,
-        'M2hip_bin.tif': 700,
-        'M3femur_bin.tif': 1650,
-        'M3hip_bin.tif': 850,
-        'M4femur_bin.tif': 1550,
-        'M4hip_bin.tif': 700,
-        'M5femur_bin.tif': 1350,
-        'M5hip_bin.tif': 800,
+        'M1femur_bin.tif': 1200,
+        'M1hip_bin.tif': 600,
+        'M2femur_bin.tif': 1400,
+        'M2hip_bin.tif': 900,
+        'M3femur_bin.tif': 1400,
+        'M3hip_bin.tif': 900,
+        'M4femur_bin.tif': 1500,
+        'M4hip_bin.tif': 650,
+        'M5femur_bin.tif': 1300,
+        'M5hip_bin.tif': 900,
     }
-    specific_files = ['M1hip_bin.tif'] #tile_size_lookup.keys()
-    hold_list = []
+    specific_files = tile_size_lookup.keys()
+    hold_list = ['M1hip_bin.tif']
     for file in target_directory.files:
         if file.type == 'tif':
             if file.name.split('_')[-1] == 'bin.tif' and not file.name in hold_list and (file.name in specific_files if len(specific_files) > 0 else True):

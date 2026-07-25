@@ -75,6 +75,7 @@ def aggregate_and_analyse_resampling_files(target_directory, dependent):
             df = file.read()
             df['mouse'] = df['name'].apply(lambda name: name[0:2])
             df['bone'] = df['name'].apply(lambda name: name.split('_')[0][2:])
+            print(f'Number of tiles from {file.name}: ', len(df)) 
             df_list.append(df.copy())
             # df_list.append(pd.DataFrame([{'mouse': df['mouse'].iloc[0], 'bone': df['bone'].iloc[0], dependent: (df[dependent]*df['filled_area']).sum()/df['filled_area'].sum()}]))
     final_df = pd.concat(df_list)
@@ -101,7 +102,7 @@ def aggregate_and_analyse_resampling_files(target_directory, dependent):
     print('')
 
     print('Results: confidence intervals')
-    print(result.conf_int())
+    print(result.conf_int(alpha=0.05))
     print('')
 
     # Direction of hip vs femur per mouse
