@@ -64,9 +64,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
     if metrics is None:
         metrics = [
-            'mean_hole_area', 'std_hole_area', 'cell_density',
-            'frac_high_density_tissue', 'frac_low_density_tissue', 
-            'frac_gap_tissue', 'ratio_high_low'
+            'cell_density','frac_dense_area', 'frac_sparse_area', 'frac_hole_area', 'ratio_high_low'
         ]
 
     # --------------------------------------------------------
@@ -76,19 +74,34 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
     image_means = {}  # { image_base_name : { metric : mean_value } }
 
     for file in target_directory.files:
-        if file.type != 'csv':
+        if file.type != 'csv' or not ('save states' in file.name) or '.tif' in file.name:
             continue
 
         df = pd.read_csv(file.path)
+        recalculate = True
+        if not ('ratio_reconstructed_mask' in df.columns) or recalculate:
+            df['mean_hole_area'] = df['hole_area']/df['n_holes']
+            df = df.drop(columns=[c for c in df.columns if 'Unnamed:' in c])
+            if not file.name == 'M2femur_results_save states.csv' or file.name == 'M5hip_results_save states.csv':
+                df['total_hd_area'] = df['high_density_area'] + df['high_density_area_anom']
+                df['total_ld_area'] = df['low_density_area'] + df['low_density_area_anom']
+            else:
+                df['total_hd_area'] = df['high_density_area']
+                df['total_ld_area'] = df['low_density_area']
+            df['reconstructed_tissue_area'] = (df['hole_area'] + df['total_hd_area'] + df['total_ld_area'])
+            df['frac_dense_area'] = df['total_hd_area']/df['reconstructed_tissue_area']
+            df['frac_sparse_area'] = df['total_ld_area']/df['reconstructed_tissue_area']
+            df['frac_hole_area'] = df['hole_area']/df['reconstructed_tissue_area']
+            # df['adjusted_fraction_high_density_tissue'] = df['high_density_area']/(df['filled_area'])
+            # df['adjusted_fraction_low_density_tissue'] = df['low_density_area']/(df['filled_area'])
+            
+            # df['adjusted_cell_density'] = df['n_cells']/(df['tissue_area']-df['hole_area'])
 
-        df['tissue_area'] = df['high_density_area'] + df['low_density_area'] + df['hole_area']
-        df['frac_high_density_tissue'] = df['high_density_area']/df['tissue_area']
-        df['frac_low_density_tissue'] = df['low_density_area']/df['tissue_area']
-        df['frac_gap_tissue'] = df['hole_area']/df['tissue_area']
-        # df['adjusted_fraction_high_density_tissue'] = df['high_density_area']/(df['filled_area'])
-        # df['adjusted_fraction_low_density_tissue'] = df['low_density_area']/(df['filled_area'])
-        
-        # df['adjusted_cell_density'] = df['n_cells']/(df['tissue_area']-df['hole_area'])
+            df['ratio_reconstructed_mask'] = df['reconstructed_tissue_area']/df['filled_area']
+            
+            df.reset_index(drop=True).to_csv(file.path)
+        df = df[df['ratio_reconstructed_mask']>0.18]
+
 
         if len(df) < min_windows:
             print(f"  [WARN] {file.name}: only {len(df)} windows — skipping (min={min_windows})")
@@ -217,13 +230,13 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
             'ns'
         )
         print(
-            f"{row.name:<22} "
-            f"{row['hip_mean']:>12.4g} "
-            f"{row['femur_mean']:>12.4g} "
-            f"{row['differences_normal']:>8} "
-            f"{row['recommended_test']:>10} "
-            f"{row['recommended_p']:>8.4f} "
-            f"{sig:>5}"
+            f"|{row.name:<22} "
+            f"|{row['hip_mean']:>12.4g} "
+            f"|{row['femur_mean']:>12.4g} "
+            f"|{row['differences_normal']:>8} "
+            f"|{row['recommended_test']:>10} "
+            f"|{row['recommended_p']:>8.4f} "
+            f"|{sig:>5} |  "
         )
 
     print(f"{'='*70}")

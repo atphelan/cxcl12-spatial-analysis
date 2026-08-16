@@ -5,58 +5,128 @@
 
 Using 5 matched hip/femur pairs.
 
+  M1hip_results_tiled.csv  <-->  M1femur_results_tiled.csv  
   M2hip_results_tiled.csv  <-->  M2femur_results_tiled.csv  
   M3hip_results_tiled.csv  <-->  M3femur_results_tiled.csv  
-  M5hip_results_tiled.csv  <-->  M5femur_results_tiled.csv  
   M4hip_results_tiled.csv  <-->  M4femur_results_tiled.csv  
-  M1hip_results_tiled.csv  <-->  M1femur_results_tiled.csv  
-
-
+  M5hip_results_tiled.csv  <-->  M5femur_results_tiled.csv  
+  
+  
 #PAIRED STATISTICAL TESTS — hip vs femur  (n=5 pairs)
 
 | Metric | Hip mean |Femur mean |Normal? | Test   |  p |  Sig |  
-|---|---|---|---|---|---|---|
-|mean_hole_area         |        5686    |     7678   |   yes |  paired_t |  0.5127  |  ns |  
-|std_hole_area           |       3570     |    4219   |   yes  | paired_t |  0.6084  |  ns |  
-|cell_density             | 0.0005437  |  0.0009209   |   yes  | paired_t  | 0.0120  |   * |  
-|frac_high_density_tissue  |     0.2818   |    0.2586  |    yes |  paired_t |  0.7168  |  ns |  
-|frac_low_density_tissue    |   0.5665   |    0.5137    |  yes |  paired_t |  0.3509  |  ns |  
-|frac_gap_tissue            |  0.1517    |   0.2277    |  yes |  paired_t |  0.0576  |  ns |  
-|ratio_high_low             |  0.6272    |   0.5326    |   no  | wilcoxon |  0.8125  |  ns |  
+|---|---|---|---|---|---|---|  
+|cell_density           |   0.0006014 |   0.0009236 |     yes |  paired_t |  0.0491 |    * |  
+|frac_dense_area        |      0.1283 |      0.1305 |     yes |  paired_t |  0.8906 |   ns |  
+|frac_sparse_area       |      0.7649 |      0.7139 |     yes |  paired_t |  0.3324 |   ns |  
+|frac_hole_area         |      0.1069 |      0.1556 |     yes |  paired_t |  0.2937 |   ns |  
+|ratio_high_low         |      0.2207 |      0.1673 |     yes |  paired_t |  0.1572 |   ns | 
 
+--------------------------------------------------------------------------------
 
-Significance: * p<0.05   ** p<0.01   *** p<0.001   ns = not significant under this test
-Note: Shapiro-Wilk has low power at small n — consider Wilcoxon as default.
+Number of tiles from M1hip_results_save states.csv:  5   
+Number of tiles from M1femur_results_save states.csv:  7   
+Number of tiles from M2hip_results_save states.csv:  22   
+Number of tiles from M2femur_results_save states.csv:  9   
+Number of tiles from M3hip_results_save states.csv:  16    
+Number of tiles from M3femur_results_save states.csv:  7   
+Number of tiles from M4hip_results_save states.csv:  9   
+Number of tiles from M4femur_results_save states.csv:  13   
+Number of tiles from M5hip_results_save states.csv:  16   
+Number of tiles from M5femur_results_save states.csv:  8   
+ 
+--------------------------------------------------------------------------------
 
-
-Number of tiles from M2hip_results_tiled.csv:  27  
-Number of tiles from M3hip_results_tiled.csv:  13  
-Number of tiles from M2femur_results_tiled.csv:  9  
-Number of tiles from M5femur_results_tiled.csv:  8  
-Number of tiles from M5hip_results_tiled.csv:  20  
-Number of tiles from M1femur_results_tiled.csv:  9  
-Number of tiles from M4hip_results_tiled.csv:  5  
-Number of tiles from M4femur_results_tiled.csv:  7  
-Number of tiles from M1hip_results_tiled.csv:  6  
-Number of tiles from M3femur_results_tiled.csv:  7  
-
+Beginning statistical analysis for cell_density
 
 Results: fitted parameters  
-Intercept         0.000920  
-C(bone)[T.hip]   -0.000374  
-Relative slope    -0.407  
-average reduction in CXCL12 cell density of 40.7% in a hip compared to the same mouse's femur  
-Group Var         1.012031  
+Intercept         0.000922  
+C(bone)[T.hip]   -0.000323  
+Group Var         0.610787  
+dtype: float64  
+Relative effect: -35.0 %
 
-Results: 95% confidence intervals 
-                Lower     Upper  
-Intercept       0.000724  0.001116  
-C(bone)[T.hip] -0.000650 -0.000099  
-Group Var      -0.125197  2.149259  
+Results: confidence intervals  
+                       0         1
+Intercept       0.000739  0.001105  
+C(bone)[T.hip] -0.000579 -0.000066  
+Group Var      -0.121235  1.342809  
 
 Percentage differences per mouse:  
-M1: femur > hip (24.3% difference) (low evidence on hip, only 6 samples)  
-M2: femur > hip (58.8% difference)  
-M3: femur > hip (35.0% difference)  
-M4: femur > hip (47.1% difference) (low evidence on hip, only 5 samples)  
-M5: femur > hip (41.8% difference)  
+M1: femur > hip (650.2 (f), 587.9 (h)) (9.6% difference)  
+M2: femur > hip (900.0 (f), 386.1 (h)) (57.1% difference)  
+M3: femur > hip (1045.9 (f), 624.7 (h)) (40.3% difference)  
+M4: femur > hip (777.9 (f), 673.1 (h)) (13.5% difference)  
+M5: femur > hip (1227.3 (f), 724.2 (h)) (41.0% difference)  
+
+--------------------------------------------------------------------------------
+
+Beginning statistical analysis for frac_dense_area.  
+
+Results: fitted parameters  
+Intercept         0.131731  
+C(bone)[T.hip]   -0.005527  
+Group Var         0.096766  
+dtype: float64  
+Relative effect: -4.2 %
+
+Results: confidence intervals  
+                       0         1  
+Intercept       0.110035  0.153428  
+C(bone)[T.hip] -0.035112  0.024059  
+Group Var      -0.089153  0.282685  
+
+Percentage differences per mouse:  
+M1: hip > femur (96004.8 (f), 137508.3 (h)) (43.2% difference)  
+M2: femur > hip (114456.8 (f), 95875.9 (h)) (16.2% difference)  
+M3: hip > femur (131967.2 (f), 142308.9 (h)) (7.8% difference)  
+M4: femur > hip (149144.6 (f), 115814.5 (h)) (22.3% difference)  
+M5: femur > hip (151126.7 (f), 118564.2 (h)) (21.5% difference)  
+
+--------------------------------------------------------------------------------
+
+Beginning statistical analysis for frac_sparse_area.  
+
+Results: fitted parameters  
+Intercept         0.716956
+C(bone)[T.hip]    0.054290
+Group Var         0.382039
+dtype: float64
+Relative effect: 7.6 %
+
+Results: confidence intervals  
+                       0         1
+Intercept       0.648225  0.785686
+C(bone)[T.hip] -0.041472  0.150052
+Group Var      -0.135508  0.899586
+
+Percentage differences per mouse:  
+M1: femur > hip (709661.7 (f), 645646.5 (h)) (9.0% difference)  
+M2: hip > femur (760101.1 (f), 849404.7 (h)) (11.7% difference)  
+M3: hip > femur (612085.2 (f), 771659.9 (h)) (26.1% difference)  
+M4: hip > femur (811383.5 (f), 815475.3 (h)) (0.5% difference)  
+M5: hip > femur (691419.6 (f), 809698.7 (h)) (17.1% difference)  
+
+--------------------------------------------------------------------------------
+
+Beginning statistical analysis for frac_hole_area.  
+
+Results: fitted parameters  
+Intercept         0.151705  
+C(bone)[T.hip]   -0.050822  
+Group Var         0.340663  
+dtype: float64  
+Relative effect: -33.5 %
+
+Results: confidence intervals  
+                       0         1  
+Intercept       0.086879  0.216532  
+C(bone)[T.hip] -0.140892  0.039249  
+Group Var      -0.135439  0.816764  
+
+Percentage differences per mouse:  
+M1: hip > femur (194333.5 (f), 216845.2 (h)) (11.6% difference)  
+M2: femur > hip (125442.1 (f), 54719.3 (h)) (56.4% difference)  
+M3: femur > hip (255947.6 (f), 86031.2 (h)) (66.4% difference)  
+M4: hip > femur (39471.9 (f), 68710.1 (h)) (74.1% difference)  
+M5: femur > hip (157453.7 (f), 71737.0 (h)) (54.4% difference)  

@@ -11,9 +11,24 @@ from skimage import io
 from skimage.draw import line
 from skimage.morphology import binary_dilation, disk
 import copy
+import json
+import zipfile
 
 from utils import Folder
 from typing import Tuple
+
+def open_zip(file_path):
+    with zipfile.ZipFile(file_path, 'r') as z:
+        tif_filename = z.namelist()[0]
+        with z.open(tif_filename) as f:
+            return io.imread(f)
+
+def open_zip_tif(file_path):
+    with zipfile.ZipFile(file_path, 'r') as z:
+        tif_filename = z.namelist()[0]
+        with z.open(tif_filename) as f:
+            with Image.open(f) as img:
+                return img
 
 black_to_green = colors.LinearSegmentedColormap.from_list(
     name="black_to_green",
@@ -1197,231 +1212,575 @@ def hole_density_from_array_extended(
     )
 
     # ========================================================
-    # Draw lines between cells and their 5 nearest neighbours
+    # Draw lines between cells and their 6 nearest neighbours
     # ========================================================
-    network_masks = [np.array(np.nan), np.nan, np.nan, np.nan, np.nan]
-    for i, max_dist in enumerate(np.array([50])*resolution):
-        network_masks[i], avg_connections = connect_cells_to_neighbours(
-            ~seed_mask,
-            k=6, # In a close-packed 2D setting, this covers the nearest neighbours
-            max_distance=max_dist*resolution, # Conversion from um to pixels
-            window_border_distance=None
-        )
-        # Remove connections which extend across holes in the tissue marked on the roi file
-        network_masks[i] = np.logical_and(network_masks[i], ~tissue_mask)
-     
-        network_masks[i] = ~(binary_dilation(
-                network_masks[i],
-                disk(network_dilation_radius)
-        ))
-
-        fig, ax = plt.subplots()
-        ax.imshow(network_masks[i], cmap='binary')
-        ax.set_title(f'{name} cell network')
-        ax.set_xlabel('X / um')
-        ax.set_ylabel('Y / um')
-
-        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
-
-        plt.savefig(f'{image_folder}/{base_name}/' + name + f'_network_mask_{max_dist}_{round(network_dilation_radius,1)}.png', bbox_inches='tight')
-        plt.close(fig)
+    network_mask = np.array(np.nan)
+    max_dist = 50*resolution
+    network_mask, avg_connections = connect_cells_to_neighbours(
+        ~seed_mask,
+        k=6, # In a close-packed 2D setting, this covers the 6 nearest neighbours
+        max_distance=max_dist*resolution, # Conversion from um to pixels
+        window_border_distance=None
+    )
+    # Remove connections which extend across holes in the tissue marked on the roi file
+    network_mask = np.logical_and(network_mask, ~tissue_mask)
     
-        print('.', end='', flush=True)
+    network_mask = ~(binary_dilation(
+            network_mask,
+            disk(network_dilation_radius)
+    ))
 
-        # mark all polygons
-        labelled_holes, n_components = label(network_masks[i])
+    fig, ax = plt.subplots()
+    ax.imshow(network_mask, cmap='binary')
+    ax.set_title(f'{name} cell network')
+    ax.set_xlabel('X / um')
+    ax.set_ylabel('Y / um')
 
-        # ========================================================
-        # COLOUR-CODED HOLE VISUALISATION
-        # ========================================================
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
 
-        colour_map = np.zeros(labelled_holes.shape, dtype=np.uint8)
-        colour_map[np.where(network_masks[i] == 0)] = 4
+    plt.savefig(f'{image_folder}/{base_name}/' + name + f'_network_mask_{round(max_dist/resolution)}_{round(network_dilation_radius/resolution,1)}.png', bbox_inches='tight')
+    plt.close(fig)
 
-        retained_holes = np.zeros_like(
-            labelled_holes,
-            dtype=np.int32
+    print('.', end='', flush=True)
+
+    # ======================================================================
+    # Save states - for changing polygon identification and testing rapidly
+    # ======================================================================
+    data_folder = 'save_states'
+    if not os.path.exists(f'{data_folder}/{base_name}'):
+        os.mkdir(f'{data_folder}/{base_name}')
+    if not os.path.exists(f'{data_folder}/{base_name}/{name}'):
+        os.mkdir(f'{data_folder}/{base_name}/{name}')
+
+    np.savetxt(f'{data_folder}/{base_name}/{name}/gfp.txt.gz', gfp.astype(np.uint8))
+    np.savetxt(f'{data_folder}/{base_name}/{name}/dapi.txt.gz', dapi.astype(np.uint8))
+    np.savetxt(f'{data_folder}/{base_name}/{name}/net.txt.gz', network_mask.astype(np.bool_))
+    np.savetxt(f'{data_folder}/{base_name}/{name}/mask.txt.gz', tissue_mask.astype(np.bool_))
+    with open(f'{data_folder}/{base_name}/{name}/saved_values.json', 'w', encoding='utf-8') as f:
+        json.dump(
+            {
+                'xrange': xrange,
+                'yrange': yrange,
+                'pixel_area': pixel_area,
+                'avg_connections': avg_connections,
+                'n_cells': int(n_cells),
+                'cell_density': float(cell_density),
+                'mean_cell_area': float(mean_cell_area),
+                'max_dist': max_dist,
+                'min_hole_area': min_hole_area,
+                'dense_polygon_max_area': dense_polygon_max_area,
+                'dense_polygon_max_length': dense_polygon_max_length,
+                'image_folder': image_folder,
+                'base_name': base_name,
+            }, f, ensure_ascii=False, indent=4)
+
+    # mark all polygons
+    labelled_holes, n_components = label(network_mask)
+
+    # ========================================================
+    # COLOUR-CODED HOLE VISUALISATION
+    # ========================================================
+
+    colour_map = np.zeros(labelled_holes.shape, dtype=np.uint8)
+    colour_map[np.where(network_mask == 0)] = 10
+
+    retained_holes = np.zeros_like(
+        labelled_holes,
+        dtype=np.int32
+    )
+
+    n_holes = 0
+    n_high_dens = 0
+    n_low_dens = 0
+    n_high_dens_anom = 0
+    n_low_dens_anom = 0
+    n_discounted = 0
+    n_bg = 0
+    n_edge_tissues = 0
+
+    area_high_dens = 0.0
+    area_low_dens = 0.0
+    area_holes = 0.0
+    area_high_dens_anom = 0.0
+    area_low_dens_anom = 0.0
+    area_discounted = 0.0
+    area_bg = 0.0
+    area_edge_tissue = 0.0
+
+    gfp_threshold_factor = 0.92
+    dapi_threshold_factor = 0.92
+    gfp_image_mean = gfp[tissue_mask == 0].mean()
+    dapi_image_mean = dapi[tissue_mask == 0].mean()
+
+    for i in range(1, n_components + 1):
+
+        component = (labelled_holes == i)
+        n_pixels = component.sum()
+        if n_pixels < 10: # Discard tiny regions from counting, but show
+            # colour_map[component] = 10
+            continue
+
+        touches_edge = (
+            component[0, :].any() or
+            component[-1, :].any() or
+            component[:, 0].any() or
+            component[:, -1].any()
         )
 
-        holes = 0
-        n_high_dens = 0
-        n_low_dens = 0
-        n_discounted_regions = 0
-        n_bg_regions = 0
-        area_high_dens = 0
-        area_low_dens = 0
-        hole_area_pixels = 0
-        area_discounted = 0
-        bg_area = 0
+        locs = np.where(component)
+        approx_l = np.sqrt((locs[0][-1]-locs[0][0])**2 + (locs[1][-1]-locs[1][0])**2) # Assuming a triangle with two similarly long sides. Will only matter for small shapes, which will be not too far from this
 
-        current_label = 1
-
-        for i in range(1, n_components + 1):
-
-            component = (labelled_holes == i)
-            n_pixels = component.sum()
-            if n_pixels < 10: # Discard tiny regions from counting, but show
-                colour_map[component] = 4
-                continue
-
-            touches_edge = (
-                component[0, :].any() or
-                component[-1, :].any() or
-                component[:, 0].any() or
-                component[:, -1].any()
-            )
-
-            locs = np.where(component)
-            approx_l = np.sqrt((locs[0][-1]-locs[0][0])**2 + (locs[1][-1]-locs[1][0])**2) # Assuming a triangle with two similarly long sides. Will only matter for small shapes, which will be not too far from this
-
-            if touches_edge:
-                colour_map[component] = 0                      # grey - edge-touching
-                n_bg_regions += 1
-                bg_area += n_pixels
-            elif dapi[component].mean() < 0.1*dapi.mean() or n_pixels > max_hole_area:
-                colour_map[component] = 4                      # red - too large, probably a different tissue e.g. trabecular bone or blood vessel
-                n_discounted_regions += 1
-                area_discounted += n_pixels
-            elif n_pixels < dense_polygon_max_area and approx_l < dense_polygon_max_length:
-                colour_map[component] = 1                      # blue - usual spacing in dense clusters
-                n_high_dens += 1
-                area_high_dens += n_pixels
-            elif gfp[component].mean() < 0.85*gfp.mean() and n_pixels > min_hole_area: # Non-parenchymal, a hole
-                    colour_map[component] = 3                      # green - non-parenchymal tissues 
-                    retained_holes[component] = current_label
-                    current_label += 1
-                    holes += 1
-                    hole_area_pixels += n_pixels
-            elif n_pixels < min_hole_area and (n_pixels > dense_polygon_max_area or approx_l > dense_polygon_max_length):
-                colour_map[component] = 2                      # light blue - sub-dense regions
-                n_low_dens += 1
-                area_low_dens += n_pixels
-            else: # Large polygon but still valid tissue
-                colour_map[component] = 2
-                n_discounted_regions += 1
-                area_discounted += n_pixels
-
-
-        cmap = colors.ListedColormap(
-            ['lightgrey', 'steelblue', 'lightblue', 'limegreen', 'grey']
-        )
-        bounds = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5]
-        norm = colors.BoundaryNorm(bounds, cmap.N)
-
-        fig, ax = plt.subplots()
-        im = ax.imshow(colour_map, cmap=cmap, norm=norm)
-
-        cbar = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3, 4])
-        cbar.ax.set_yticklabels([
-            'Background', #1
-            'Dense CXCL12 region', #2
-            'Sparse CXCL12 region', #3
-            'Expected non-parenchyma', #4
-            'Other tissues', #5
-        ])
-
-        ax.set_title(f'{name} hole classification')
-        ax.set_xlabel('X / um')
-        ax.set_ylabel('Y / um')
-
-        ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
-        ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
-
-        plt.savefig(
-            f'{image_folder}/{base_name}/' + name + f'_labelled_holes_{max_dist}_{min_hole_area}_{dense_polygon_max_area}.png',
-            bbox_inches='tight'
-        )
-        plt.close(fig)
-        print('.', end='', flush=True)
-
-        # ========================================================
-        # HOLE STATISTICS
-        # ========================================================
-
-        hole_sizes = np.bincount(
-            retained_holes.ravel()
-        )[1:]
-
-        hole_sizes_scaled = hole_sizes * pixel_area
-
-        hole_area = hole_area_pixels * pixel_area
-
-        tissue_area = tissue_area - area_discounted * pixel_area # Remove sum of red region pixels
-
-        hole_fraction = (
-            hole_area /
-            (hole_area + tissue_area)
-            if (hole_area + tissue_area) > 0
-            else np.nan
-        )
-
-        if len(hole_sizes_scaled) > 0:
-
-            mean_hole_area = np.mean(hole_sizes_scaled)
-
-            largest_hole_area = np.max(hole_sizes_scaled)
-
-            std_hole_area = np.std(hole_sizes_scaled)
-
-            # cv_hole_area = (
-            #     std_hole_area / mean_hole_area
-            #     if mean_hole_area > 0
-            #     else np.nan
-            # )
-
-
+        if (colour_map[component] == 10).all():
+            continue
+        elif touches_edge:
+            colour_map[component] = 1 # dark grey - edge-touching, record what was removed
+            n_bg += 1
+            area_bg += n_pixels
+            n_discounted += 1 # Inconsistent behaviour at the border - best to remove from analysis
+            area_discounted += n_pixels
+            if n_pixels > 1000: # Re-adding stuff that's probably tissue
+                bg_tissue_area = (~tissue_mask)[component & (tissue_mask == 0)].sum()
+                if bg_tissue_area > 10:
+                    n_edge_tissues += 1
+                    area_edge_tissue += bg_tissue_area
+                    area_bg -= bg_tissue_area
+                    colour_map[component & (tissue_mask == 0)] = 2 # light grey
+        elif dapi[component].mean() < dapi_threshold_factor*dapi_image_mean:
+            if gfp[component].mean() < gfp_threshold_factor*gfp_image_mean:
+                colour_map[component] = 2 # Light grey, record and remove area
+                n_discounted += 1
+                area_bg += n_pixels
+            else:
+                if n_pixels < dense_polygon_max_area and approx_l < dense_polygon_max_length:
+                    colour_map[component] = 5 # light yellow - usual spacing in dense GFP cell clusters, but DAPI absent
+                    n_high_dens_anom += 1
+                    area_high_dens_anom += n_pixels
+                else:
+                    colour_map[component] = 4 # dark yellow - sparser bits with DAPI absent
+                    n_low_dens_anom += 1
+                    area_low_dens_anom += n_pixels
         else:
+            if gfp[component].mean() > gfp_threshold_factor*gfp_image_mean:
+                if n_pixels < dense_polygon_max_area and approx_l < dense_polygon_max_length:
+                    colour_map[component] = 7 # light green - usual spacing in dense clusters
+                    n_high_dens += 1
+                    area_high_dens += n_pixels
+                else:
+                    colour_map[component] = 6 # dark green - all other usual tissue
+                    n_low_dens += 1
+                    area_low_dens += n_pixels
+            else:
+                colour_map[component] = 3
+                n_holes += 1 # Blue - parenchymal holes
+                area_holes += n_pixels
 
-            mean_hole_area = 0
-            largest_hole_area = 0
-            std_hole_area = 0
-            # cv_hole_area = np.nan
+    colour_map[np.where(network_mask == 0)] = 0
+    cmap = colors.ListedColormap(
+        [
+         'black', #0
+         'dimgrey', #1
+         'darkgrey', #2
+         'cornflowerblue', #3 
+         '#F9EAB7', #4
+         '#D5B341', #5
+         '#B9E3A9', #6
+         '#5E9C3D' #7
+        ]
+    )
+    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
+    norm = colors.BoundaryNorm(bounds, cmap.N)
 
-        out_df.append({
-            "name": f"{name}_md={max_dist}",
+    fig, ax = plt.subplots()
+    im = ax.imshow(colour_map, cmap=cmap, norm=norm)
 
-            # hole statistics
-            "n_holes": holes,
-            "hole_density": (
-                holes / tissue_area
-                if tissue_area > 0
-                else np.nan
-            ),
-            "hole_area": hole_area,
-            "hole_coverage": hole_fraction,
+    cbar = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3, 4, 5, 6, 7])
+    cbar.ax.set_yticklabels([
+        'Network', #0
+        'Background', #1
+        'Tissue gap', #2
+        'Parenchymal hole', #3
+        'Sparse region (no DAPI)', #4
+        'Dense region (no DAPI)', #5
+        'Sparse region', #6
+        'Dense region', #7
+    ])
 
-            "mean_hole_area": mean_hole_area,
-            "largest_hole_area": largest_hole_area,
-            "std_hole_area": std_hole_area,
-            # "cv_hole_area": cv_hole_area,
-            "average_connections_per_cell": avg_connections,
+    ax.set_title(f'{name} hole classification')
+    ax.set_xlabel('X / um')
+    ax.set_ylabel('Y / um')
 
-            # cxcl12 stromal cell statistics
-            "filled_area": tissue_area,
-            "n_cells": int(n_cells),
-            "cell_density": cell_density,
-            "mean_cell_area": mean_cell_area,
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{xrange[0] + x / resolution:.0f}'))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{yrange[0] + y / resolution:.0f}'))
 
-            # tissue statistics
-            "high_density_polygons": n_high_dens,
-            "low_density_polygons": n_low_dens,
-            "high_density_area": area_high_dens / resolution**2,
-            "low_density_area": area_low_dens / resolution**2,
-            "ratio_high_low": area_high_dens/area_low_dens,
-            "n_discounted_regions": n_discounted_regions,
-            "area_discounted": area_discounted / resolution**2,
-            "background_regions": n_bg_regions,
-            "background_area": bg_area / resolution**2,
+    plt.savefig(
+        f'{image_folder}/{base_name}/' + name + f'_labelled_holes_{round(max_dist/resolution)}_{round(min_hole_area/resolution)}_{round(dense_polygon_max_area/resolution)}.png',
+        bbox_inches='tight'
+    )
+    plt.close(fig)
+    print('.', end='', flush=True)
 
-            # optional debugging output
-            # "tissue_mask": tissue_mask,
-            # "seed_mask": seed_mask
-        })
+    # ========================================================
+    # HOLE STATISTICS
+    # ========================================================
+
+    hole_sizes = np.bincount(
+        retained_holes.ravel()
+    )[1:]
+
+    hole_sizes_scaled = hole_sizes * pixel_area
+
+    hole_area = area_holes * pixel_area
+
+    tissue_area = tissue_area - area_discounted * pixel_area # Remove sum of red region pixels
+
+    hole_fraction = (
+        hole_area /
+        (hole_area + tissue_area)
+        if (hole_area + tissue_area) > 0
+        else np.nan
+    )
+
+    if len(hole_sizes_scaled) > 0:
+
+        mean_hole_area = np.mean(hole_sizes_scaled)
+        largest_hole_area = np.max(hole_sizes_scaled)
+        std_hole_area = np.std(hole_sizes_scaled)
+
+    else:
+
+        mean_hole_area = 0
+        largest_hole_area = 0
+        std_hole_area = 0
+
+    out_df.append({
+        "name": f"{name}_md={max_dist}",
+
+        # hole statistics
+        "n_holes": n_holes,
+        "hole_density": (
+            n_holes / tissue_area
+            if tissue_area > 0
+            else np.nan
+        ),
+        "hole_area": hole_area,
+        "hole_coverage": hole_fraction,
+
+        "mean_hole_area": mean_hole_area,
+        "largest_hole_area": largest_hole_area,
+        "std_hole_area": std_hole_area,
+        # "cv_hole_area": cv_hole_area,
+        "average_connections_per_cell": avg_connections,
+
+        # cxcl12 stromal cell statistics
+        "filled_area": tissue_area,
+        "n_cells": int(n_cells),
+        "cell_density": cell_density,
+        "mean_cell_area": mean_cell_area,
+
+        # tissue statistics
+        "high_density_polygons": n_high_dens,
+        "low_density_polygons": n_low_dens,
+        "high_density_area": area_high_dens / resolution**2,
+        "low_density_area": area_low_dens / resolution**2,
+        "ratio_high_low": area_high_dens/area_low_dens,
+        "n_discounted_regions": n_discounted,
+        "area_discounted": area_discounted / resolution**2,
+        "background_regions": n_bg,
+        "background_area": area_bg / resolution**2,
+        "high_density_polygons_anom": n_high_dens_anom,
+        "low_density_polygons_anom": n_low_dens_anom,
+        "high_density_area_anom": area_high_dens_anom / resolution**2,
+        "low_density_area_anom": area_low_dens_anom / resolution**2,
+
+        "re-added_sections_from_edge": n_edge_tissues,
+        "re-added_area_from_edge": area_edge_tissue / resolution**2
+
+        # optional debugging output
+        # "tissue_mask": tissue_mask,
+        # "seed_mask": seed_mask
+    })
 
     print('.')
     return pd.DataFrame(out_df)
 
+def classify_polygons_from_save_state(name, network_mask, gfp, dapi, tissue_mask, saved_values):
+
+    print(f'Processing {name}', end='', flush=True)
+    # mark all polygons
+    labelled_holes, n_components = label(network_mask)
+
+    print('.', end='', flush=True)
+
+    # ========================================================
+    # COLOUR-CODED HOLE VISUALISATION
+    # ========================================================
+
+    colour_map = np.zeros(labelled_holes.shape, dtype=np.uint8)
+    colour_map[np.where(network_mask == 0)] = 10
+
+    retained_holes = np.zeros_like(
+        labelled_holes,
+        dtype=np.int32
+    )
+
+    n_holes = 0
+    n_high_dens = 0
+    n_low_dens = 0
+    n_high_dens_anom = 0
+    n_low_dens_anom = 0
+    n_discounted = 0
+    n_bg = 0
+    n_edge_tissues = 0
+
+    area_high_dens = 0.0
+    area_low_dens = 0.0
+    area_holes = 0.0
+    area_high_dens_anom = 0.0
+    area_low_dens_anom = 0.0
+    area_discounted = 0.0
+    area_bg = 0.0
+    area_edge_tissue = 0.0
+
+    # threshold of 1 will split the distribution around the mean
+    # Too much green and/or yellow: increase GFP threshold
+    # Too much blue and/or grey: increase DAPI threshold
+    gfp_threshold_factor = 0.99 # previously 1.05, mix of brightnesses 
+    dapi_threshold_factor = 0.99 # previously 1.0, too green
+    gfp_image_mean = gfp[tissue_mask == 0].mean()
+    dapi_image_mean = dapi[tissue_mask == 0].mean()
+
+    for i in range(1, n_components + 1):
+
+        component = (labelled_holes == i)
+        n_pixels = component.sum()
+        if n_pixels < 10: # Discard tiny regions from counting, but show
+            # colour_map[component] = 10
+            continue
+
+        touches_edge = (
+            component[0, :].any() or
+            component[-1, :].any() or
+            component[:, 0].any() or
+            component[:, -1].any()
+        )
+
+        locs = np.where(component)
+        approx_l = np.sqrt((locs[0][-1]-locs[0][0])**2 + (locs[1][-1]-locs[1][0])**2) # Assuming a triangle with two similarly long sides. Will only matter for small shapes, which will be not too far from this
+
+        if (colour_map[component] == 10).all():
+            continue
+        elif touches_edge:
+            colour_map[component] = 1 # dark grey - edge-touching, record what was removed
+            n_bg += 1
+            area_bg += n_pixels
+            n_discounted += 1 # Inconsistent behaviour at the border - best to remove from analysis
+            area_discounted += n_pixels
+            if n_pixels > 1000: # Re-adding stuff that's probably tissue
+                bg_tissue_area = (~tissue_mask)[component & (tissue_mask == 0)].sum()
+                if bg_tissue_area > 10:
+                    n_edge_tissues += 1
+                    area_edge_tissue += bg_tissue_area
+                    area_bg -= bg_tissue_area
+                    colour_map[component & (tissue_mask == 0)] = 2 # light grey
+        elif dapi[component].mean() < dapi_threshold_factor*dapi_image_mean:
+            if gfp[component].mean() < gfp_threshold_factor*gfp_image_mean:
+                colour_map[component] = 2 # Light grey, record and remove area
+                n_discounted += 1
+                area_discounted += n_pixels
+                area_bg += n_pixels
+            else:
+                if n_pixels < saved_values['dense_polygon_max_area'] and approx_l < saved_values['dense_polygon_max_length']:
+                    colour_map[component] = 5 # light yellow - usual spacing in dense GFP cell clusters, but DAPI absent
+                    n_high_dens_anom += 1
+                    area_high_dens_anom += n_pixels
+                else:
+                    colour_map[component] = 4 # dark yellow - sparser bits with DAPI absent
+                    n_low_dens_anom += 1
+                    area_low_dens_anom += n_pixels
+        else:
+            if gfp[component].mean() > gfp_threshold_factor*gfp_image_mean:
+                if n_pixels < saved_values['dense_polygon_max_area'] and approx_l < saved_values['dense_polygon_max_length']:
+                    colour_map[component] = 7 # light green - usual spacing in dense clusters
+                    n_high_dens += 1
+                    area_high_dens += n_pixels
+                else:
+                    colour_map[component] = 6 # dark green - all other usual tissue
+                    n_low_dens += 1
+                    area_low_dens += n_pixels
+            else:
+                colour_map[component] = 3
+                n_holes += 1 # Blue - parenchymal holes
+                area_holes += n_pixels
+
+    print('.', end='', flush=True)
+
+    colour_map[np.where(network_mask == 0)] = 0
+    cmap = colors.ListedColormap(
+        [
+         'black', #0
+         'dimgrey', #1
+         'darkgrey', #2
+         'cornflowerblue', #3 
+         '#F9EAB7', #4
+         '#D5B341', #5
+         '#B9E3A9', #6
+         '#5E9C3D' #7
+        ]
+    )
+    bounds = [-0.5, 0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5, 7.5]
+    norm = colors.BoundaryNorm(bounds, cmap.N)
+
+    fig, ax = plt.subplots()
+    im = ax.imshow(colour_map, cmap=cmap, norm=norm)
+
+    cbar = fig.colorbar(im, ax=ax, ticks=[0, 1, 2, 3, 4, 5, 6, 7])
+    cbar.ax.set_yticklabels([
+        'Network', #0
+        'Background', #1
+        'Tissue gap/dim signal', #2
+        'Parenchymal hole', #3
+        'Sparse region (no DAPI)', #4
+        'Dense region (no DAPI)', #5
+        'Sparse region', #6
+        'Dense region', #7
+    ])
+
+    ax.set_title(f'{name} hole classification')
+    ax.set_xlabel('X / um')
+    ax.set_ylabel('Y / um')
+
+    ax.xaxis.set_major_formatter(ticker.FuncFormatter(lambda x, _: f'{saved_values['xrange'][0] + x / resolution:.0f}'))
+    ax.yaxis.set_major_formatter(ticker.FuncFormatter(lambda y, _: f'{saved_values['yrange'][0] + y / resolution:.0f}'))
+
+    plt.savefig(
+        f'{saved_values['image_folder']}/{saved_values['base_name']}/' + name + f'_labelled_holes_{round(saved_values['max_dist']/resolution)}_{round(saved_values['min_hole_area']/resolution)}_{round(saved_values['dense_polygon_max_area']/resolution)}.png',
+        bbox_inches='tight'
+    )
+    plt.close(fig)
+    print('.', end='', flush=True)
+
+    # ========================================================
+    # HOLE STATISTICS
+    # ========================================================
+
+    hole_sizes = np.bincount(
+        retained_holes.ravel()
+    )[1:]
+
+    hole_sizes_scaled = hole_sizes * saved_values['pixel_area']
+
+    hole_area = area_holes * saved_values['pixel_area']
+
+    tissue_area = np.prod(tissue_mask.shape)
+    tissue_area = (tissue_area - area_discounted) * saved_values['pixel_area'] # Remove sum of red region pixels
+
+    hole_fraction = (
+        hole_area /
+        (hole_area + tissue_area)
+        if (hole_area + tissue_area) > 0
+        else np.nan
+    )
+
+    if len(hole_sizes_scaled) > 0:
+
+        mean_hole_area = np.mean(hole_sizes_scaled)
+        largest_hole_area = np.max(hole_sizes_scaled)
+        std_hole_area = np.std(hole_sizes_scaled)
+
+    else:
+
+        mean_hole_area = 0
+        largest_hole_area = 0
+        std_hole_area = 0
+
+    print(' Done!')
+    return {
+        "name": f"{name}_md={saved_values['max_dist']}",
+
+        # hole statistics
+        "n_holes": n_holes,
+        "hole_density": (
+            n_holes / tissue_area
+            if tissue_area > 0
+            else np.nan
+        ),
+        "hole_area": hole_area,
+        "hole_coverage": hole_fraction,
+
+        "mean_hole_area": mean_hole_area,
+        "largest_hole_area": largest_hole_area,
+        "std_hole_area": std_hole_area,
+        # "cv_hole_area": cv_hole_area,
+        "average_connections_per_cell": saved_values['avg_connections'],
+
+        # cxcl12 stromal cell statistics
+        "filled_area": tissue_area,
+        "n_cells": int(saved_values['n_cells']),
+        "cell_density": saved_values['cell_density'],
+        "mean_cell_area": saved_values['mean_cell_area'],
+
+        # tissue statistics
+        "high_density_polygons": n_high_dens,
+        "low_density_polygons": n_low_dens,
+        "high_density_area": area_high_dens / resolution**2,
+        "low_density_area": area_low_dens / resolution**2,
+        "ratio_high_low": area_high_dens/area_low_dens,
+        "n_discounted_regions": n_discounted,
+        "area_discounted": area_discounted / resolution**2,
+        "background_regions": n_bg,
+        "background_area": area_bg / resolution**2,
+        "high_density_polygons_anom": n_high_dens_anom,
+        "low_density_polygons_anom": n_low_dens_anom,
+        "high_density_area_anom": area_high_dens_anom / resolution**2,
+        "low_density_area_anom": area_low_dens_anom / resolution**2,
+
+        "re-added_sections_from_edge": n_edge_tissues,
+        "re-added_area_from_edge": area_edge_tissue / resolution**2
+
+        # optional debugging output
+        # "tissue_mask": tissue_mask,
+        # "seed_mask": seed_mask
+    }
+
+def analyse_save_states(name, data_folder):
+    '''
+    Analyse all saved states with the base name inputted to this function.
+    Starts in a folder containing all windows as their own folders.
+    '''
+    results = []
+    for window_folder in Folder(data_folder).subfolders:
+        with open(window_folder.path + '/saved_values.json', 'r') as f:
+            saved_values = json.load(f) # Edit this file directly to run different params or edit the code
+        try:
+            gfp = np.loadtxt(window_folder.path + '/gfp.txt.gz')
+            dapi = np.loadtxt(window_folder.path + '/dapi.txt.gz')
+            mask = np.loadtxt(window_folder.path + '/mask.txt.gz').astype(bool)
+            net = np.loadtxt(window_folder.path + '/net.txt.gz').astype(bool)
+        except: # Mix of compressed and uncompressed files across images, but always consistent per folder
+            gfp = np.loadtxt(window_folder.path + '/gfp.txt')
+            dapi = np.loadtxt(window_folder.path + '/dapi.txt')
+            mask = np.loadtxt(window_folder.path + '/mask.txt').astype(bool)
+            net = np.loadtxt(window_folder.path + '/net.txt').astype(bool)
+        out_df = pd.DataFrame([classify_polygons_from_save_state(window_folder.name, net, gfp, dapi, mask, saved_values)])
+
+        if len(out_df) == 0:
+            raise ValueError("Empty dataframe returned!")
+        elif out_df.isna().sum().sum() > 0:
+            print(' NaN in output, adding to data anyway.')
+            results.append(out_df)
+            continue
+        elif out_df['n_cells'].max() < 50:
+            print(' Insufficient cells in this window, skipping to next.')
+            continue
+        else:
+            results.append(out_df)
+
+    return pd.concat(results)
+            
+
+    
+        
 
 def analyse_image(
     a: np.ndarray,
@@ -1434,7 +1793,9 @@ def analyse_image(
     image_folder: str = 'troubleshoot_images',
     resolution: float = 1   # Pixels per micrometre
 ):
-    if type(window_mode) is str:
+    if window_mode == 'save states':
+        return analyse_save_states(filename, 'save_states/' + filename.split('_')[0])
+    elif type(window_mode) is str:
         return analyse_resampled_windows(
             a,
             xrange,
@@ -1442,7 +1803,7 @@ def analyse_image(
             window_size=window_size, # Micrometres
             n_samples=n_samples,
             window_mode=window_mode,
-            file_name=filename,
+            file_name=filename + '.tif.zip',
             locale_pixel_radius=5,
             min_seed_pixels=20,
             cell_dilation_radius=2.0,
@@ -1451,7 +1812,7 @@ def analyse_image(
             min_hole_area=2500, # Trying to remove dense spacing from counts of holes
             max_hole_area=1E5, # Try to remove any tissue tears or interrupting other tissues e.g. bone from the analysis
             min_cell_size=50,
-            min_cell_radius=1.5,
+            min_cell_radius=1.8,
             image_folder=image_folder,
             resolution=resolution,
         )
@@ -1500,14 +1861,10 @@ def analyse_resampled_windows(
     ):
     window_size = int(window_size * resolution) # resolution in pixels per um, so window_size in pixels after here
     results = []
-    print(f'Taking up to {n_samples} windows.')
     window_ids = [i for i in range(1, n_samples+1)]
-    mask = io.imread('tissue masks/' + file_name.replace('_bin', '_mask'))
-    gfp = io.imread('originals/' + file_name.replace('_bin', '_cxcl12'))
-    try:
-        dapi = io.imread('originals/' + file_name.replace('_bin', '_dapi'))
-    except:
-        dapi = np.array(np.nan)
+    mask = open_zip('tissue masks/' + file_name.replace('_bin', '_mask'))
+    gfp = open_zip('originals/' + file_name.replace('_bin', '_cxcl12'))
+    dapi = open_zip('originals/' + file_name.replace('_bin', '_dapi'))
     while len(results) < n_samples:
         if window_mode == 'tiled':
             windows, report = sample_windows_modes(
@@ -1520,7 +1877,7 @@ def analyse_resampled_windows(
             )
         elif window_mode == 'greedy':
             windows, report = sample_windows_adaptive(
-                a            = image,
+                a,
                 tissue_mask  = mask.astype(bool),
                 base_size    = 1400,
                 size_tolerance   = 0.3,
@@ -1565,9 +1922,11 @@ def analyse_resampled_windows(
 
             if len(out_df) == 0:
                 raise ValueError("Empty dataframe returned!")
-            elif out_df.isna().sum().sum() > 1:
+            elif out_df.isna().sum().sum() > 0:
+                print(' NaN in output, skipping to next.')
                 continue
             elif out_df['n_cells'].max() < 50:
+                print(' Insufficient cells in this window, skipping to next.')
                 continue
             else:
                 window_ids.remove(sample_id)
@@ -1587,55 +1946,56 @@ import warnings
 if __name__ == '__main__':
     target_directory = Folder('binaries')
     tile_size_lookup = {
-        'M1femur_bin.tif': 1200,
-        'M1hip_bin.tif': 600,
-        'M2femur_bin.tif': 1400,
-        'M2hip_bin.tif': 900,
-        'M3femur_bin.tif': 1400,
-        'M3hip_bin.tif': 900,
-        'M4femur_bin.tif': 1500,
-        'M4hip_bin.tif': 650,
-        'M5femur_bin.tif': 1300,
-        'M5hip_bin.tif': 900,
+        'M1femur_bin.tif.zip': 1200,
+        'M1hip_bin.tif.zip': 600,
+        'M1thv_bin.tif.zip': 700,
+        'M2femur_bin.tif.zip': 1400,
+        'M2hip_bin.tif.zip': 900,
+        'M3femur_bin.tif.zip': 1400,
+        'M3hip_bin.tif.zip': 900,
+        'M4femur_bin.tif.zip': 1258,
+        'M4hip_bin.tif.zip': 1000,
+        'M5femur_bin.tif.zip': 1300,
+        'M5hip_bin.tif.zip': 900,
     }
-    specific_files = tile_size_lookup.keys()
-    hold_list = ['M1hip_bin.tif']
+    specific_files = ['M5hip_bin.tif.zip'] #tile_size_lookup.keys()
+    hold_list = []
     for file in target_directory.files:
-        if file.type == 'tif':
-            if file.name.split('_')[-1] == 'bin.tif' and not file.name in hold_list and (file.name in specific_files if len(specific_files) > 0 else True):
+        if file.type == 'zip':
+            if file.name.split('_')[-1] == 'bin.tif.zip' and not file.name in hold_list and (file.name in specific_files if len(specific_files) > 0 else True):
                 print(f'Opening {file.name}...')
-                image = io.imread(file.path)
+                binary = open_zip(file.path)
                 try:
-                    with Image.open(file.path) as img:
-                        meta_dict = {TAGS[key] : img.tag[key] for key in img.tag.keys()}
-                        resolution = float(img.tag_v2.get(282))  # 282 = XResolution tag, returns a clean float
-                        if resolution != float(img.tag_v2.get(283)):
-                            raise ValueError('Axes not set equal in Tif image.')
+                    img = open_zip_tif(file.path)
+                    meta_dict = {TAGS[key] : img.tag[key] for key in img.tag.keys()}
+                    resolution = float(img.tag_v2.get(282))  # 282 = XResolution tag, returns a clean float
+                    if resolution != float(img.tag_v2.get(283)):
+                        raise ValueError('Axes not set equal in Tif image.')
                     del(img)
                     if not 'micron' in meta_dict['ImageDescription'][0]:
                         warnings.warn("Warning - image length not in units of Micrometres.")
                 except: # Get metadata from mask instead of binary if there is an issue with the binary
                     print('Taking metadata from roi instead of binary...')
-                    with Image.open(file.path.replace('binaries', 'tissue masks').replace('_bin', '_mask')) as img:
-                        meta_dict = {TAGS[key] : img.tag[key] for key in img.tag.keys()}
-                        resolution = float(img.tag_v2.get(282))  # 282 = XResolution tag, returns a clean float
-                        if resolution != float(img.tag_v2.get(283)):
-                            raise ValueError('Axes not set equal in Tif image.')
+                    img = open_zip_tif(file.path.replace('binaries', 'tissue masks').replace('_bin', '_mask'))
+                    meta_dict = {TAGS[key] : img.tag[key] for key in img.tag.keys()}
+                    resolution = float(img.tag_v2.get(282))  # 282 = XResolution tag, returns a clean float
+                    if resolution != float(img.tag_v2.get(283)):
+                        raise ValueError('Axes not set equal in Tif image.')
                     del(img)
                     if not 'micron' in meta_dict['ImageDescription'][0]:
                         warnings.warn("Warning - image length not in units of Micrometres.")
 
                 print('Analysing ' + file.name + ':')
-                window_mode = 'tiled'
+                window_mode = 'save states'
                 df = analyse_image(
-                    a=image,
-                    xrange=(0, image.shape[1]),
-                    yrange=(0, image.shape[0]),
+                    a=binary,
+                    xrange=(0, binary.shape[1]),
+                    yrange=(0, binary.shape[0]),
                     window_mode=window_mode, # Process full image or not - full image is usually too big! put None for full image.
-                    filename=file.name,
+                    filename=file.name.split('.')[0],
                     image_folder='troubleshoot_images',
                     resolution=resolution,
                     window_size=tile_size_lookup[file.name],
                     n_samples=50,
                 )
-                df.dropna().to_csv('data/' + file.name[:-4].replace('bin', 'results') + f'_{window_mode}.csv')
+                df.dropna().to_csv('data/' + file.name[:-4].split('.')[0].replace('bin', 'results') + f'_{window_mode}.csv')
