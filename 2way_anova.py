@@ -67,7 +67,7 @@ from utils import Folder
 # print("Hole coverage ANOVA results dilated 10x")
 # print(anova_result2) # If eta_sq << 1, not much difference explained. Go for 0.1+.
 
-def aggregate_and_analyse_resampling_files(target_directory, dependent, print_tile_count=False):
+def aggregate_and_analyse_resampling_files(target_directory, dependent, print_tile_count=False, adjustment_factor=1.0, rounding=1):
     print("-"*80)
     print("")
     print("Beginning statistical analysis for", f"{dependent}.  ")
@@ -123,11 +123,11 @@ def aggregate_and_analyse_resampling_files(target_directory, dependent, print_ti
         hip   = sub[sub['bone'] == 'hip'][dependent].values[0]
         femur = sub[sub['bone'] == 'femur'][dependent].values[0]
         direction = 'hip > femur' if hip > femur else 'femur > hip'
-        stats = f"({round(femur*1E6, 1)} (f), {round(hip*1E6, 1)} (h))"
+        stats = f"({round(femur*adjustment_factor, rounding)} (f), {round(hip*adjustment_factor, rounding)} (h))"
         print(f"{mouse}: {direction} {stats} ({abs(hip-femur)/femur*100:.1f}% difference)  ")
     print('')
 
-aggregate_and_analyse_resampling_files('data', 'cell_density', print_tile_count=True)
-aggregate_and_analyse_resampling_files('data', 'frac_dense_area')
-aggregate_and_analyse_resampling_files('data', 'frac_sparse_area')
-aggregate_and_analyse_resampling_files('data', 'frac_hole_area')
+aggregate_and_analyse_resampling_files('data', 'cell_density', print_tile_count=True, adjustment_factor=1E6, rounding=1)
+aggregate_and_analyse_resampling_files('data', 'frac_dense_area', rounding=3)
+aggregate_and_analyse_resampling_files('data', 'frac_sparse_area', rounding=3)
+aggregate_and_analyse_resampling_files('data', 'frac_hole_area', rounding=3)

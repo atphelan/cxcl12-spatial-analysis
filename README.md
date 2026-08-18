@@ -52,7 +52,7 @@ Intercept       0.000739  0.001105
 C(bone)[T.hip] -0.000579 -0.000066  
 Group Var      -0.121235  1.342809  
 
-Percentage differences per mouse:  
+Percentage differences per mouse per mm^2:  
 M1: femur > hip (650.2 (f), 587.9 (h)) (9.6% difference)  
 M2: femur > hip (900.0 (f), 386.1 (h)) (57.1% difference)  
 M3: femur > hip (1045.9 (f), 624.7 (h)) (40.3% difference)  
@@ -77,11 +77,11 @@ C(bone)[T.hip] -0.035112  0.024059
 Group Var      -0.089153  0.282685  
 
 Percentage differences per mouse:  
-M1: hip > femur (96004.8 (f), 137508.3 (h)) (43.2% difference)  
-M2: femur > hip (114456.8 (f), 95875.9 (h)) (16.2% difference)  
-M3: hip > femur (131967.2 (f), 142308.9 (h)) (7.8% difference)  
-M4: femur > hip (149144.6 (f), 115814.5 (h)) (22.3% difference)  
-M5: femur > hip (151126.7 (f), 118564.2 (h)) (21.5% difference)  
+M1: hip > femur (0.096 (f), 0.138 (h)) (43.2% difference)  
+M2: femur > hip (0.114 (f), 0.096 (h)) (16.2% difference)  
+M3: hip > femur (0.132 (f), 0.142 (h)) (7.8% difference)  
+M4: femur > hip (0.149 (f), 0.116 (h)) (22.3% difference)  
+M5: femur > hip (0.151 (f), 0.119 (h)) (21.5% difference)  
 
 --------------------------------------------------------------------------------
 
@@ -101,11 +101,11 @@ C(bone)[T.hip] -0.041472  0.150052
 Group Var      -0.135508  0.899586
 
 Percentage differences per mouse:  
-M1: femur > hip (709661.7 (f), 645646.5 (h)) (9.0% difference)  
-M2: hip > femur (760101.1 (f), 849404.7 (h)) (11.7% difference)  
-M3: hip > femur (612085.2 (f), 771659.9 (h)) (26.1% difference)  
-M4: hip > femur (811383.5 (f), 815475.3 (h)) (0.5% difference)  
-M5: hip > femur (691419.6 (f), 809698.7 (h)) (17.1% difference)  
+M1: femur > hip (0.71 (f), 0.646 (h)) (9.0% difference)  
+M2: hip > femur (0.76 (f), 0.849 (h)) (11.7% difference)  
+M3: hip > femur (0.612 (f), 0.772 (h)) (26.1% difference)  
+M4: hip > femur (0.811 (f), 0.815 (h)) (0.5% difference)  
+M5: hip > femur (0.691 (f), 0.81 (h)) (17.1% difference)  
 
 --------------------------------------------------------------------------------
 
@@ -125,8 +125,8 @@ C(bone)[T.hip] -0.140892  0.039249
 Group Var      -0.135439  0.816764  
 
 Percentage differences per mouse:  
-M1: hip > femur (194333.5 (f), 216845.2 (h)) (11.6% difference)  
-M2: femur > hip (125442.1 (f), 54719.3 (h)) (56.4% difference)  
-M3: femur > hip (255947.6 (f), 86031.2 (h)) (66.4% difference)  
-M4: hip > femur (39471.9 (f), 68710.1 (h)) (74.1% difference)  
-M5: femur > hip (157453.7 (f), 71737.0 (h)) (54.4% difference)  
+M1: hip > femur (0.194 (f), 0.217 (h)) (11.6% difference)  
+M2: femur > hip (0.125 (f), 0.055 (h)) (56.4% difference)  
+M3: femur > hip (0.256 (f), 0.086 (h)) (66.4% difference)  
+M4: hip > femur (0.039 (f), 0.069 (h)) (74.1% difference)  
+M5: femur > hip (0.157 (f), 0.072 (h)) (54.4% difference)  
