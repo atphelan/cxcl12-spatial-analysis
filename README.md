@@ -16,12 +16,14 @@ Using 5 matched hip/femur pairs.
 
 | Metric | Hip mean |Femur mean |Normal? | Test   |  p |  Sig |  
 |---|---|---|---|---|---|---|  
-|cell_density           |   0.0006014 |   0.0009236 |     yes |  paired_t |  0.0491 |    * |  
+|cell_density / mm^2    |       601.4 |       923.6 |     yes |  paired_t |  0.0491 |    * |  
+|cell_density_whole_mask / mm^2 |   393.4 |   750.5 |     yes |  paired_t |  0.0230 |    * | 
 |frac_dense_area        |      0.1283 |      0.1305 |     yes |  paired_t |  0.8906 |   ns |  
 |frac_sparse_area       |      0.7649 |      0.7139 |     yes |  paired_t |  0.3324 |   ns |  
 |frac_hole_area         |      0.1069 |      0.1556 |     yes |  paired_t |  0.2937 |   ns |  
 |ratio_high_low         |      0.2207 |      0.1673 |     yes |  paired_t |  0.1572 |   ns | 
 
+Note: whole mask cxcl12 density includes gap area in the calculation e.g. trabecular bone, larger blood vessels
 --------------------------------------------------------------------------------
 
 Number of tiles from M1hip_results_save states.csv:  5   

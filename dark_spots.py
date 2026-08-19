@@ -1576,7 +1576,7 @@ def classify_polygons_from_save_state(name, network_mask, gfp, dapi, tissue_mask
             area_bg += n_pixels
             n_discounted += 1 # Inconsistent behaviour at the border - best to remove from analysis
             area_discounted += n_pixels
-            if n_pixels > 1000: # Re-adding stuff that's probably tissue
+            if n_pixels > 1000: # Re-adding stuff that's probably tissue holes, not off-mask background
                 bg_tissue_area = (~tissue_mask)[component & (tissue_mask == 0)].sum()
                 if bg_tissue_area > 10:
                     n_edge_tissues += 1

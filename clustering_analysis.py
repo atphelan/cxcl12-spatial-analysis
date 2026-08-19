@@ -64,7 +64,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
     if metrics is None:
         metrics = [
-            'cell_density','frac_dense_area', 'frac_sparse_area', 'frac_hole_area', 'ratio_high_low', 'prop_removed_area'
+            'cell_density', 'cell_density_whole_mask', 'frac_dense_area', 'frac_sparse_area', 'frac_hole_area', 'ratio_high_low', 'prop_removed_area', 're-added_area_from_edge'
         ]
 
     # --------------------------------------------------------
@@ -78,7 +78,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
             continue
 
         df = pd.read_csv(file.path)
-        recalculate = True
+        recalculate = False
         if not ('ratio_reconstructed_mask' in df.columns) or recalculate:
             df['mean_hole_area'] = df['hole_area']/df['n_holes']
             df = df.drop(columns=[c for c in df.columns if 'Unnamed:' in c])
@@ -89,6 +89,8 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
                 df['total_hd_area'] = df['high_density_area']
                 df['total_ld_area'] = df['low_density_area']
             df['reconstructed_tissue_area'] = (df['hole_area'] + df['total_hd_area'] + df['total_ld_area'])
+            df['cell_density_whole_mask'] = df['cell_density']*df['reconstructed_tissue_area']/(df['reconstructed_tissue_area'] + df['area_discounted'] - df['background_area'])
+            # df['gap_area'] = df['area_discounted'] - df['background_area']
             df['frac_dense_area'] = df['total_hd_area']/df['reconstructed_tissue_area']
             df['frac_sparse_area'] = df['total_ld_area']/df['reconstructed_tissue_area']
             df['frac_hole_area'] = df['hole_area']/df['reconstructed_tissue_area']
