@@ -64,7 +64,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
     if metrics is None:
         metrics = [
-            'cell_density', 'cell_density_whole_mask', 'frac_dense_area', 'frac_sparse_area', 'frac_hole_area', 'ratio_high_low', 'prop_removed_area', 're-added_area_from_edge'
+            'cell_density', 'cell_density_whole_mask', 'frac_dense_area', 'frac_sparse_area', 'frac_hole_area', 'ratio_high_low', 'prop_removed_area', 're-added_area_from_edge', 'sparse_number_density'
         ]
 
     # --------------------------------------------------------
@@ -78,11 +78,12 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
             continue
 
         df = pd.read_csv(file.path)
-        recalculate = False
+        recalculate = True
+        ignore_yellows = ['M2femur_results_save states.csv', 'M5hip_results_save states.csv', 'M3hip_results_save states.csv']
         if not ('ratio_reconstructed_mask' in df.columns) or recalculate:
             df['mean_hole_area'] = df['hole_area']/df['n_holes']
             df = df.drop(columns=[c for c in df.columns if 'Unnamed:' in c])
-            if not file.name == 'M2femur_results_save states.csv' or file.name == 'M5hip_results_save states.csv':
+            if not file.name in ignore_yellows:
                 df['total_hd_area'] = df['high_density_area'] + df['high_density_area_anom']
                 df['total_ld_area'] = df['low_density_area'] + df['low_density_area_anom']
             else:
@@ -93,6 +94,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
             # df['gap_area'] = df['area_discounted'] - df['background_area']
             df['frac_dense_area'] = df['total_hd_area']/df['reconstructed_tissue_area']
             df['frac_sparse_area'] = df['total_ld_area']/df['reconstructed_tissue_area']
+            df['sparse_number_density'] = df['low_density_polygons']/df['reconstructed_tissue_area']
             df['frac_hole_area'] = df['hole_area']/df['reconstructed_tissue_area']
             df['prop_removed_area'] = df['area_discounted']/df['reconstructed_tissue_area']
             # df['adjusted_fraction_high_density_tissue'] = df['high_density_area']/(df['filled_area'])
@@ -101,6 +103,11 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
             # df['adjusted_cell_density'] = df['n_cells']/(df['tissue_area']-df['hole_area'])
 
             df['ratio_reconstructed_mask'] = df['reconstructed_tissue_area']/df['filled_area']
+
+            if file.name == 'M5femur_results_save states.csv' or file.name == 'M2hip_results_save states.csv':
+                df['cell_density_whole_mask'] = df['cell_density'] # Dark spots in GFP image not well accounted for in whole mask density
+
+
             
             df.reset_index(drop=True).to_csv(file.path)
         df = df[df['ratio_reconstructed_mask']>0.18]

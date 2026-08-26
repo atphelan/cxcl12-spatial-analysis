@@ -207,6 +207,7 @@ marimo/_lsp/
 __marimo__/
 
 save_states/*
+data/other_data
 
 *.tif
 .DS_store

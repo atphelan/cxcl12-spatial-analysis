@@ -1027,6 +1027,8 @@ def hole_density_from_array_extended(
     if mode == 'windows':
         if np.isnan(gfp).sum() > 0:
             gfp = io.imread(f"originals/{name.split('/')[-1].split('_sample')[0].replace('_bin', '_cxcl12')}.tif")
+        if len(gfp.shape) > 2:
+            gfp = gfp[:,:,1]
         gfp = gfp[yrange[0]:yrange[1]].T[xrange[0]:xrange[1]].T # This has to be in pixels
         fig, ax = plt.subplots()
         ax.imshow(gfp, black_to_green)
@@ -1050,6 +1052,8 @@ def hole_density_from_array_extended(
         if mode == 'windows':
             if np.isnan(dapi).sum() > 0:
                 dapi = io.imread(f"originals/{name.split('/')[-1].split('_sample')[0].replace('_bin', '_dapi')}.tif")
+            if len(dapi.shape) > 2:
+                dapi = dapi[:,:,2]
             dapi = dapi[yrange[0]:yrange[1]].T[xrange[0]:xrange[1]].T # This has to be in pixels
             fig, ax = plt.subplots()
             ax.imshow(dapi, black_to_blue)
@@ -1308,8 +1312,8 @@ def hole_density_from_array_extended(
     area_bg = 0.0
     area_edge_tissue = 0.0
 
-    gfp_threshold_factor = 0.92
-    dapi_threshold_factor = 0.92
+    gfp_threshold_factor = 0.65
+    dapi_threshold_factor = 0.65
     gfp_image_mean = gfp[tissue_mask == 0].mean()
     dapi_image_mean = dapi[tissue_mask == 0].mean()
 
@@ -1545,8 +1549,8 @@ def classify_polygons_from_save_state(name, network_mask, gfp, dapi, tissue_mask
     # threshold of 1 will split the distribution around the mean
     # Too much green and/or yellow: increase GFP threshold
     # Too much blue and/or grey: increase DAPI threshold
-    gfp_threshold_factor = 0.99 # previously 1.05, mix of brightnesses 
-    dapi_threshold_factor = 0.99 # previously 1.0, too green
+    gfp_threshold_factor = 0.995 # previously 1.05, mix of brightnesses 
+    dapi_threshold_factor = 0.995 # previously 1.0, too green
     gfp_image_mean = gfp[tissue_mask == 0].mean()
     dapi_image_mean = dapi[tissue_mask == 0].mean()
 
@@ -1958,7 +1962,7 @@ if __name__ == '__main__':
         'M5femur_bin.tif.zip': 1300,
         'M5hip_bin.tif.zip': 900,
     }
-    specific_files = ['M5hip_bin.tif.zip'] #tile_size_lookup.keys()
+    specific_files = ['M5femur_bin.tif.zip'] #'M3femur_bin.tif.zip', 'M2femur_bin.tif.zip'] #tile_size_lookup.keys()
     hold_list = []
     for file in target_directory.files:
         if file.type == 'zip':
