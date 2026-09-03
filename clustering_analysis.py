@@ -42,7 +42,9 @@ def make_summary_table_10images(target_directory):
 def run_paired_statistics(target_directory, metrics=None, min_windows=3):
     """
     Runs paired statistical tests (Wilcoxon signed-rank + paired t-test)
-    comparing hip vs femur for each metric, using per-image means.
+    comparing hip vs femur for each metric, using per-image area-weighted
+    means (weighted by filled_area per tile) to avoid bias from unequal
+    tile counts across images.
 
     Parameters
     ----------
@@ -64,14 +66,30 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
     if metrics is None:
         metrics = [
-            'cell_density', 'cell_density_whole_mask', 'frac_dense_area', 'frac_sparse_area', 'frac_hole_area', 'ratio_high_low', 'prop_removed_area', 're-added_area_from_edge', 'sparse_number_density'
+            'cell_density', 'cell_density_whole_mask', 'frac_dense_area',
+            'frac_sparse_area', 'frac_hole_area', 'ratio_high_low',
+            'prop_removed_area', 're-added_area_from_edge', 'sparse_number_density'
         ]
 
+    tile_size_lookup = {
+        'M1femur_bin.tif.zip': 1200,
+        'M1hip_bin.tif.zip': 600,
+        'M1thv_bin.tif.zip': 700,
+        'M2femur_bin.tif.zip': 1400,
+        'M2hip_bin.tif.zip': 900,
+        'M3femur_bin.tif.zip': 1400,
+        'M3hip_bin.tif.zip': 900,
+        'M4femur_bin.tif.zip': 1258,
+        'M4hip_bin.tif.zip': 1000,
+        'M5femur_bin.tif.zip': 1300,
+        'M5hip_bin.tif.zip': 900,
+    }
+
     # --------------------------------------------------------
-    # Load and average all valid files
+    # Load and compute area-weighted means for all valid files
     # --------------------------------------------------------
 
-    image_means = {}  # { image_base_name : { metric : mean_value } }
+    image_means = {}  # { image_base_name : { metric : weighted_mean_value } }
 
     for file in target_directory.files:
         if file.type != 'csv' or not ('save states' in file.name) or '.tif' in file.name:
@@ -79,54 +97,90 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
         df = pd.read_csv(file.path)
         recalculate = True
-        ignore_yellows = ['M2femur_results_save states.csv', 'M5hip_results_save states.csv', 'M3hip_results_save states.csv']
+        ignore_yellows = [
+            'M2femur_results_save states.csv',
+            'M5hip_results_save states.csv',
+            'M3hip_results_save states.csv'
+        ]
+
         if not ('ratio_reconstructed_mask' in df.columns) or recalculate:
-            df['mean_hole_area'] = df['hole_area']/df['n_holes']
+            df['mean_hole_area'] = df['hole_area'] / df['n_holes']
             df = df.drop(columns=[c for c in df.columns if 'Unnamed:' in c])
-            if not file.name in ignore_yellows:
+
+            if file.name not in ignore_yellows:
                 df['total_hd_area'] = df['high_density_area'] + df['high_density_area_anom']
-                df['total_ld_area'] = df['low_density_area'] + df['low_density_area_anom']
+                df['total_ld_area'] = df['low_density_area']  + df['low_density_area_anom']
             else:
                 df['total_hd_area'] = df['high_density_area']
                 df['total_ld_area'] = df['low_density_area']
-            df['reconstructed_tissue_area'] = (df['hole_area'] + df['total_hd_area'] + df['total_ld_area'])
-            df['cell_density_whole_mask'] = df['cell_density']*df['reconstructed_tissue_area']/(df['reconstructed_tissue_area'] + df['area_discounted'] - df['background_area'])
-            # df['gap_area'] = df['area_discounted'] - df['background_area']
-            df['frac_dense_area'] = df['total_hd_area']/df['reconstructed_tissue_area']
-            df['frac_sparse_area'] = df['total_ld_area']/df['reconstructed_tissue_area']
-            df['sparse_number_density'] = df['low_density_polygons']/df['reconstructed_tissue_area']
-            df['frac_hole_area'] = df['hole_area']/df['reconstructed_tissue_area']
-            df['prop_removed_area'] = df['area_discounted']/df['reconstructed_tissue_area']
-            # df['adjusted_fraction_high_density_tissue'] = df['high_density_area']/(df['filled_area'])
-            # df['adjusted_fraction_low_density_tissue'] = df['low_density_area']/(df['filled_area'])
-            
-            # df['adjusted_cell_density'] = df['n_cells']/(df['tissue_area']-df['hole_area'])
 
-            df['ratio_reconstructed_mask'] = df['reconstructed_tissue_area']/df['filled_area']
+            df['reconstructed_tissue_area'] = (
+                df['hole_area'] + df['total_hd_area'] + df['total_ld_area']
+            )
+            df['cell_density_whole_mask'] = (
+                df['cell_density'] * df['reconstructed_tissue_area']
+                / (df['reconstructed_tissue_area'] + df['area_discounted'] - df['background_area'])
+            )
+            df['frac_dense_area']      = df['total_hd_area'] / df['reconstructed_tissue_area']
+            df['frac_sparse_area']     = df['total_ld_area']  / df['reconstructed_tissue_area']
+            df['sparse_number_density']= df['low_density_polygons'] / df['reconstructed_tissue_area']
+            df['frac_hole_area']       = df['hole_area'] / df['reconstructed_tissue_area']
+            df['prop_removed_area']    = df['area_discounted'] / (df['reconstructed_tissue_area'] + df['area_discounted'])
+            df['ratio_reconstructed_mask'] = df['reconstructed_tissue_area'] / df['filled_area']
 
-            if file.name == 'M5femur_results_save states.csv' or file.name == 'M2hip_results_save states.csv':
-                df['cell_density_whole_mask'] = df['cell_density'] # Dark spots in GFP image not well accounted for in whole mask density
+            df['tile_area'] = tile_size_lookup[file.name.split('_')[0] + '_bin.tif.zip']**2
 
+            df['frac_density_change'] = (df['cell_density']-df['cell_density_whole_mask'])/df['cell_density_whole_mask']
 
-            
+            if file.name in (
+                'M5femur_results_save states.csv',
+                # 'M2hip_results_save states.csv'
+            ):
+                # Dark spots in GFP image not well accounted for in whole
+                # mask density — use reconstructed-area density directly
+                df['cell_density_whole_mask'] = df['cell_density']
+
             df.reset_index(drop=True).to_csv(file.path)
-        df = df[df['ratio_reconstructed_mask']>0.18]
 
+        df = df[df['ratio_reconstructed_mask'] > 0.18]
 
         if len(df) < min_windows:
-            print(f"  [WARN] {file.name}: only {len(df)} windows — skipping (min={min_windows})")
+            print(
+                f"  [WARN] {file.name}: only {len(df)} windows "
+                f"— skipping (min={min_windows})"
+            )
             continue
 
         base_name = file.name.split('_bin')[0]  # e.g. 'M3hip' or 'M3femur'
 
-        image_means[base_name] = {
-            metric: df[metric].mean()
-            for metric in metrics
-            if metric in df.columns
-        }
+        # Area-weighted mean across tiles: each tile contributes in
+        # proportion to its filled_area, so images with more/larger
+        # tiles do not dominate the per-image summary statistic.
+        # This matches the weighting used in the mixed-effects model.
+        weights = df['filled_area'].values
+
+        # See everything
+        ordinal_type = df['name'].dtype
+        metrics = [c for c in df.columns if df[c].dtype != ordinal_type]
+
+        image_means[base_name] = {}
+        for metric in metrics:
+            if metric not in df.columns:
+                continue
+            vals = df[metric].values
+            # Guard against all-NaN or zero-weight edge cases
+            valid = np.isfinite(vals) & np.isfinite(weights) & (weights > 0)
+            if valid.sum() == 0:
+                image_means[base_name][metric] = np.nan
+            else:
+                image_means[base_name][metric] = (
+                    np.average(vals[valid], weights=weights[valid])
+                )
 
     if not image_means:
-        raise ValueError("No valid files found. Check target directory and file naming.")
+        raise ValueError(
+            "No valid files found. Check target directory and file naming."
+        )
 
     # --------------------------------------------------------
     # Build matched hip / femur pairs
@@ -134,25 +188,27 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
     pairs = []
 
-    for name, values in image_means.items():
+    for name in image_means:
         if 'hip' not in name:
             continue
-
         partner = name.replace('hip', 'femur')
-
         if partner not in image_means:
             print(f"  [WARN] No matching femur found for {name} — skipping.")
             continue
-
         pairs.append((name, partner))
 
     if not pairs:
-        raise ValueError("No matched hip/femur pairs found. Check file naming.")
+        raise ValueError(
+            "No matched hip/femur pairs found. Check file naming."
+        )
+
+    # Sort pairs so mouse ordering is consistent everywhere
+    pairs = sorted(pairs, key=lambda x: x[0])
 
     n_pairs = len(pairs)
-    print(f"\nFound {n_pairs} matched hip/femur pairs:")
+    print(f"\nUsing {n_pairs} matched hip/femur pairs.")
     for hip, femur in pairs:
-        print(f"  {hip}  <-->  {femur}")
+        print(f"  {hip}  <-->  {femur}  ")
 
     # --------------------------------------------------------
     # Run tests for each metric
@@ -162,8 +218,15 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
     for metric in metrics:
 
-        hip_means   = [image_means[hip][metric]   for hip, _      in pairs if metric in image_means[hip]]
-        femur_means = [image_means[femur][metric]  for _,   femur  in pairs if metric in image_means[femur]]
+        # Extract values in consistent pair order
+        hip_means   = []
+        femur_means = []
+        for hip, femur in pairs:
+            h = image_means[hip].get(metric,   np.nan)
+            f = image_means[femur].get(metric, np.nan)
+            if np.isfinite(h) and np.isfinite(f):
+                hip_means.append(h)
+                femur_means.append(f)
 
         if len(hip_means) != len(femur_means) or len(hip_means) < 2:
             print(f"  [WARN] {metric}: insufficient paired data — skipping.")
@@ -174,16 +237,15 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
         differences = hip_means - femur_means
 
         # --- Shapiro-Wilk on differences ---
-        if len(differences) >= 3:  # Shapiro requires n >= 3
+        if len(differences) >= 3:
             sw_stat, sw_p = shapiro(differences)
         else:
             sw_stat, sw_p = np.nan, np.nan
 
         # --- Paired t-test ---
-        tt  = ttest_rel(hip_means, femur_means)
+        tt = ttest_rel(hip_means, femur_means)
 
         # --- Wilcoxon signed-rank ---
-        # Requires n >= 2; catches edge case where all differences are zero
         try:
             wx = wilcoxon(hip_means, femur_means)
             wx_stat, wx_p = wx.statistic, wx.pvalue
@@ -192,31 +254,21 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
             print(f"  [WARN] Wilcoxon failed for {metric}: {e}")
 
         results.append({
-            'metric':               metric,
-            'n_pairs':              n_pairs,
-
-            # Per-group descriptives
-            'hip_mean':             np.mean(hip_means),
-            'hip_std':              np.std(hip_means,   ddof=1),
-            'femur_mean':           np.mean(femur_means),
-            'femur_std':            np.std(femur_means, ddof=1),
-
-            # Normality of differences
-            'shapiro_W':            round(sw_stat, 4) if not np.isnan(sw_stat) else np.nan,
-            'shapiro_p':            round(sw_p,    4) if not np.isnan(sw_p)    else np.nan,
-            'differences_normal':   'yes' if sw_p > 0.05 else 'no',
-
-            # Paired t-test
-            't_stat':               round(tt.statistic, 4),
-            't_p':                  round(tt.pvalue,    4),
-
-            # Wilcoxon signed-rank
-            'wilcoxon_W':           round(wx_stat, 4) if not np.isnan(wx_stat) else np.nan,
-            'wilcoxon_p':           round(wx_p,    4) if not np.isnan(wx_p)    else np.nan,
-
-            # Recommended test given normality check
-            'recommended_test':     'paired_t' if sw_p > 0.05 else 'wilcoxon',
-            'recommended_p':        round(tt.pvalue, 4) if sw_p > 0.05 else round(wx_p, 4),
+            'metric':             metric,
+            'n_pairs':            n_pairs,
+            'hip_mean':           np.mean(hip_means),
+            'hip_std':            np.std(hip_means,   ddof=1),
+            'femur_mean':         np.mean(femur_means),
+            'femur_std':          np.std(femur_means, ddof=1),
+            'shapiro_W':          round(sw_stat, 4) if np.isfinite(sw_stat) else np.nan,
+            'shapiro_p':          round(sw_p,    4) if np.isfinite(sw_p)    else np.nan,
+            'differences_normal': 'yes' if (np.isfinite(sw_p) and sw_p > 0.05) else 'no',
+            't_stat':             round(tt.statistic, 4),
+            't_p':                round(tt.pvalue,    4),
+            'wilcoxon_W':         round(wx_stat, 4) if np.isfinite(wx_stat) else np.nan,
+            'wilcoxon_p':         round(wx_p,    4) if np.isfinite(wx_p)    else np.nan,
+            'recommended_test':   'paired_t' if (np.isfinite(sw_p) and sw_p > 0.05) else 'wilcoxon',
+            'recommended_p':      round(tt.pvalue, 4) if (np.isfinite(sw_p) and sw_p > 0.05) else round(wx_p, 4),
         })
 
     results_df = pd.DataFrame(results).set_index('metric')
@@ -228,8 +280,10 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
     print(f"\n{'='*70}")
     print(f"  PAIRED STATISTICAL TESTS — hip vs femur  (n={n_pairs} pairs)")
     print(f"{'='*70}")
-    print(f"{'Metric':<22} {'Hip mean':>12} {'Femur mean':>12} {'Normal?':>8} "
-        f"{'Test':>10} {'p':>8} {'Sig':>5}")
+    print(
+        f"{'Metric':<22} {'Hip mean':>12} {'Femur mean':>12} {'Normal?':>8} "
+        f"{'Test':>10} {'p':>8} {'Sig':>5}"
+    )
     print(f"{'-'*70}")
 
     for _, row in results_df.iterrows():
@@ -250,10 +304,15 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
         )
 
     print(f"{'='*70}")
-    print("Significance: * p<0.05   ** p<0.01   *** p<0.001   ns = not significant under this test")
-    print("Note: Shapiro-Wilk has low power at small n — consider Wilcoxon as default.\n")
+    print(
+        "Significance: * p<0.05   ** p<0.01   *** p<0.001   ns = not significant\n"
+        "Note: Shapiro-Wilk has low power at small n — consider Wilcoxon as default.\n"
+        "Note: Means are area-weighted across tiles (by filled_area) to avoid\n"
+        "      bias from unequal tile counts between images.\n"
+    )
 
     return results_df
+
 
 if __name__ == '__main__':
     target_directory = Folder('data')
