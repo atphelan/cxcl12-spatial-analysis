@@ -310,6 +310,324 @@ def plot_per_mouse_boxplots(
     return fig, ax
 
 
+def plot_two_column_scatter(
+    target_directory,
+    dependent         = 'cell_density_whole_mask',
+    adjustment_factor = 1.0,
+    normalise_to_femur= False,
+    y_label           = None,
+    title             = None,
+    min_windows       = 3,
+    ignore_yellows    = None,
+    figsize           = (4, 5),
+    font_size         = 13,
+    save_path         = None,
+):
+    """
+    Two-column scatter plot (femur left, hip right) showing all tile-level
+    values across all mice, colour-coded by mouse.  Per-mouse weighted means
+    are shown as horizontal lines spanning each column.  Optionally normalises
+    all values to the per-mouse femur weighted mean.
+
+    Parameters
+    ----------
+    target_directory : Folder
+    dependent : str
+        Column name to plot on the y-axis.
+    adjustment_factor : float
+        Multiplicative scaling for y values (e.g. 1e6 for µm⁻² → mm⁻²).
+    normalise_to_femur : bool
+        If True, divide all values (both bones) for each mouse by that
+        mouse's area-weighted femur mean, so femur points scatter around 1.
+    y_label : str or None
+    title : str or None
+    min_windows : int
+    ignore_yellows : list of str or None
+    figsize : tuple
+    font_size : int
+        Base font size — axis labels, tick labels, and annotations scale
+        from this value.
+    save_path : str or None
+    """
+
+    from scipy.stats import ttest_rel, wilcoxon, shapiro
+
+    if ignore_yellows is None:
+        ignore_yellows = [
+            'M2femur_results_save states.csv',
+            'M5hip_results_save states.csv',
+            'M3hip_results_save states.csv',
+        ]
+
+    if y_label is None:
+        y_label = dependent
+        if normalise_to_femur:
+            y_label += '  (normalised to femur mean)'
+    if title is None:
+        title = dependent
+
+    FILE_ENDING = '_results_save states.csv'
+
+    # Distinct colours per mouse — colourblind-friendly palette
+    MOUSE_COLOURS = {
+        'M1': '#4477AA',
+        'M2': '#EE6677',
+        'M3': '#228833',
+        'M4': '#CCBB44',
+        'M5': '#AA3377',
+    }
+
+    # ── 1. Load tile-level data ───────────────────────────────────────────────
+
+    image_tiles = {}    # { 'M1femur...' : array of scaled tile values }
+    image_means = {}    # { 'M1femur...' : area-weighted mean }
+
+    for file in target_directory.files:
+        if file.type != 'csv':
+            continue
+        if 'save states' not in file.name:
+            continue
+        if '.tif' in file.name:
+            continue
+
+        df = pd.read_csv(file.path)
+        df = df.drop(columns=[c for c in df.columns if 'Unnamed:' in c],
+                     errors='ignore')
+
+        if file.name in (
+            'M5femur_results_save states.csv',
+            'M2hip_results_save states.csv',
+        ):
+            df['cell_density_whole_mask'] = df['cell_density']
+
+        df = df[df['ratio_reconstructed_mask'] > 0.18]
+
+        if len(df) < min_windows:
+            print(f'  [WARN] {file.name}: only {len(df)} windows — skipping.')
+            continue
+
+        if dependent not in df.columns:
+            print(f'  [WARN] {file.name}: column "{dependent}" not found — skipping.')
+            continue
+
+        vals    = df[dependent].values * adjustment_factor
+        weights = df['filled_area'].values
+        valid   = np.isfinite(vals) & np.isfinite(weights) & (weights > 0)
+
+        image_tiles[file.name] = vals[valid]
+        image_means[file.name] = np.average(vals[valid], weights=weights[valid])
+
+    # ── 2. Mice and normalisation denominators ────────────────────────────────
+
+    mice = sorted({k[:2] for k in image_means})
+
+    # Per-mouse femur mean used for optional normalisation
+    femur_norm = {}
+    for m in mice:
+        fk = m + 'femur' + FILE_ENDING
+        if fk in image_means:
+            femur_norm[m] = image_means[fk]
+
+    def normalise(mouse, val):
+        if not normalise_to_femur:
+            return val
+        denom = femur_norm.get(mouse, np.nan)
+        return val / denom if denom and np.isfinite(denom) else np.nan
+
+    # ── 3. Significance test on per-mouse weighted means ─────────────────────
+
+    paired_f, paired_h = [], []
+    for m in mice:
+        fk = m + 'femur' + FILE_ENDING
+        hk = m + 'hip'   + FILE_ENDING
+        if fk in image_means and hk in image_means:
+            paired_f.append(normalise(m, image_means[fk]))
+            paired_h.append(normalise(m, image_means[hk]))
+
+    paired_f = np.array(paired_f)
+    paired_h = np.array(paired_h)
+    diffs    = paired_h - paired_f
+
+    sw_p = shapiro(diffs).pvalue if len(diffs) >= 3 else np.nan
+
+    try:
+        if np.isfinite(sw_p) and sw_p > 0.05:
+            p_val      = ttest_rel(paired_f, paired_h).pvalue
+            test_label = 'paired t'
+        else:
+            p_val      = wilcoxon(paired_f, paired_h).pvalue
+            test_label = 'Wilcoxon'
+    except Exception:
+        p_val, test_label = np.nan, ''
+
+    if np.isfinite(p_val):
+        stars   = '***' if p_val < 0.001 else '**' if p_val < 0.01 \
+                  else '*' if p_val < 0.05 else 'ns'
+        p_str   = 'p < 0.001' if p_val < 0.001 else f'p = {p_val:.4f}'
+        sig_str = f'{p_str}  {stars}\n({test_label}, n = {len(paired_f)})'
+    else:
+        sig_str = ''
+
+    # ── 4. Plot ───────────────────────────────────────────────────────────────
+
+    JITTER      = 0.07    # horizontal jitter width
+    ALPHA_TILE  = 0.55    # tile point transparency
+    MARKER_SIZE = 40      # tile point size
+    MEAN_WIDTH  = 0.30    # half-width of the per-mouse mean tick
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    rng = np.random.default_rng(seed=42)
+
+    # Track all plotted y values to set ylim sensibly
+    all_y = []
+
+    for mouse in mice:
+        colour = MOUSE_COLOURS.get(mouse, 'grey')
+
+        for col_x, bone in ((0, 'femur'), (1, 'hip')):
+            key  = mouse + bone + FILE_ENDING
+            if key not in image_tiles:
+                continue
+
+            raw_tiles = image_tiles[key]
+            raw_mean  = image_means[key]
+
+            tiles = np.array([normalise(mouse, v) for v in raw_tiles])
+            mean  = normalise(mouse, raw_mean)
+
+            # Jittered x positions
+            jx = col_x + rng.uniform(-JITTER, JITTER, size=len(tiles))
+
+            ax.scatter(
+                jx, tiles,
+                color      = colour,
+                s          = MARKER_SIZE,
+                alpha      = ALPHA_TILE,
+                linewidths = 0.3,
+                edgecolors = 'white',
+                zorder     = 3,
+            )
+
+            # Per-mouse mean as a bold horizontal tick
+            ax.plot(
+                [col_x - MEAN_WIDTH, col_x + MEAN_WIDTH],
+                [mean, mean],
+                color     = colour,
+                linewidth = 2.5,
+                solid_capstyle = 'round',
+                zorder    = 5,
+            )
+
+            all_y.extend(tiles[np.isfinite(tiles)].tolist())
+
+    # ── 5. Overall mean lines ─────────────────────────────────────────────────
+
+    OVERALL_WIDTH = 0.42
+
+    if len(paired_f):
+        ax.plot(
+            [-OVERALL_WIDTH, OVERALL_WIDTH],
+            [paired_f.mean(), paired_f.mean()],
+            color     = 'black',
+            linewidth = 2.0,
+            linestyle = '--',
+            zorder    = 6,
+        )
+    if len(paired_h):
+        ax.plot(
+            [1 - OVERALL_WIDTH, 1 + OVERALL_WIDTH],
+            [paired_h.mean(), paired_h.mean()],
+            color     = 'black',
+            linewidth = 2.0,
+            linestyle = '--',
+            zorder    = 6,
+        )
+
+    # ── 6. Significance bracket ───────────────────────────────────────────────
+
+    y_max     = max(all_y) if all_y else 1
+    y_range   = y_max - min(all_y) if all_y else 1
+    bracket_y = y_max + y_range * 0.10
+    desc_len  = y_range * 0.03
+
+    ax.plot([0, 0, 1, 1],
+            [bracket_y - desc_len, bracket_y,
+             bracket_y, bracket_y - desc_len],
+            color='dimgrey', linewidth=1.2)
+
+    ax.text(
+        0.5, bracket_y + y_range * 0.01,
+        sig_str,
+        ha        = 'center',
+        va        = 'bottom',
+        fontsize  = font_size - 2,
+        color     = 'dimgrey',
+        linespacing = 1.4,
+    )
+
+    # ── 7. Reference line at 1.0 when normalised ─────────────────────────────
+
+    if normalise_to_femur:
+        ax.axhline(1.0, color='dimgrey', linewidth=0.8,
+                   linestyle=':', alpha=0.6, zorder=2)
+
+    # ── 8. Legend — mice only ─────────────────────────────────────────────────
+
+    legend_handles = [
+        plt.Line2D([0], [0], marker='o', color='w',
+                   markerfacecolor=MOUSE_COLOURS.get(m, 'grey'),
+                   markersize=font_size * 0.7, label=m)
+        for m in mice if m in MOUSE_COLOURS
+    ]
+    # legend_handles.append(
+    #     plt.Line2D([0], [0], color='black', linewidth=2.0,
+    #                linestyle='--', label='Overall mean')
+    # )
+    # legend_handles.append(
+    #     plt.Line2D([0], [0], color='grey', linewidth=2.5,
+    #                label='Per-mouse mean')
+    # )
+
+    ax.legend(
+        handles   = legend_handles,
+        fontsize  = font_size - 3,
+        frameon   = False,
+        loc       = 'upper right',
+        handlelength = 1.2,
+    )
+
+    # ── 9. Axes formatting ────────────────────────────────────────────────────
+
+    y_pad = y_range * 0.05
+    ax.set_ylim(min(all_y) - y_pad,
+                bracket_y + y_range * 0.18 + len(sig_str.splitlines()) * y_range * 0.06)
+    ax.set_xlim(-0.55, 1.55)
+
+    ax.set_xticks([0, 1])
+    ax.set_xticklabels(['Femur', 'Hip'], fontsize=font_size)
+    ax.set_ylabel(y_label, fontsize=font_size - 1)
+    ax.tick_params(axis='y', labelsize=font_size - 2)
+
+    ax.set_title(title, fontsize=font_size - 1, pad=8)
+
+    ax.spines['top'].set_visible(False)
+    ax.spines['right'].set_visible(False)
+    ax.spines['bottom'].set_visible(False)
+    ax.tick_params(axis='x', length=0)
+
+    fig.tight_layout()
+
+    if save_path:
+        fig.savefig(save_path, dpi=300, bbox_inches='tight')
+        print(f'Figure saved to {save_path}')
+    else:
+        plt.show()
+
+    return fig, ax
+
+
+
 def plot_2d_scatter(
     target_directory,
     x                 = '',
@@ -841,14 +1159,14 @@ if __name__ == '__main__':
     folder = Folder('data')
     dep = 'cell_density_whole_mask'
 
-    plot_per_mouse_boxplots(
-        target_directory  = folder,
-        dependent         = dep,
-        adjustment_factor = 1E6,          # µm^-2 → mm^-2
-        y_label           = 'CXCL12 cell density (cells / mm²)', #dep.replace('_', ' '), 
-        title             = f'Total CXCL12 cell density within endosteal boundary — femur vs hip',
-        save_path         = f'figures/fig_{dep}.png',
-    )
+    # plot_per_mouse_boxplots(
+    #     target_directory  = folder,
+    #     dependent         = dep,
+    #     adjustment_factor = 1E6,          # µm^-2 → mm^-2
+    #     y_label           = 'CXCL12 cell density (cells / mm²)', #dep.replace('_', ' '), 
+    #     title             = f'Total CXCL12 cell density within endosteal boundary — femur vs hip',
+    #     save_path         = f'figures/fig_{dep}.png',
+    # )
 
     # plot_2d_scatter(
     #     target_directory  = folder,
@@ -874,3 +1192,17 @@ if __name__ == '__main__':
     #     figsize           = (11, 5),
     #     save_path         = 'figures/fig_density_increase.png',
     # )
+
+    plot_two_column_scatter(
+        target_directory  = folder,
+        dependent         = dep,
+        adjustment_factor = 1E6,
+        normalise_to_femur= False,
+        y_label           = dep.replace('_', ' '),
+        title             = None,
+        min_windows       = 3,
+        ignore_yellows    = None,
+        figsize           = (6, 5),
+        font_size         = 16,
+        save_path         = f'figures/small_fig_{dep}.png',
+    )

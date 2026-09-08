@@ -1312,8 +1312,8 @@ def hole_density_from_array_extended(
     area_bg = 0.0
     area_edge_tissue = 0.0
 
-    gfp_threshold_factor = 0.65
-    dapi_threshold_factor = 0.65
+    gfp_threshold_factor = 0.98
+    dapi_threshold_factor = 1.00
     gfp_image_mean = gfp[tissue_mask == 0].mean()
     dapi_image_mean = dapi[tissue_mask == 0].mean()
 
@@ -1549,8 +1549,8 @@ def classify_polygons_from_save_state(name, network_mask, gfp, dapi, tissue_mask
     # threshold of 1 will split the distribution around the mean
     # Too much green and/or yellow: increase GFP threshold
     # Too much blue and/or grey: increase DAPI threshold
-    gfp_threshold_factor = 0.995 # previously 1.05, mix of brightnesses 
-    dapi_threshold_factor = 0.995 # previously 1.0, too green
+    gfp_threshold_factor = 0.98 # previously 1.05, mix of brightnesses 
+    dapi_threshold_factor = 1.0 # previously 1.0, too green
     gfp_image_mean = gfp[tissue_mask == 0].mean()
     dapi_image_mean = dapi[tissue_mask == 0].mean()
 
@@ -1962,7 +1962,7 @@ if __name__ == '__main__':
         'M5femur_bin.tif.zip': 1300,
         'M5hip_bin.tif.zip': 900,
     }
-    specific_files = ['M5femur_bin.tif.zip'] #'M3femur_bin.tif.zip', 'M2femur_bin.tif.zip'] #tile_size_lookup.keys()
+    specific_files = ['M4femur_bin.tif.zip'] #'M3femur_bin.tif.zip', 'M2femur_bin.tif.zip'] #tile_size_lookup.keys()
     hold_list = []
     for file in target_directory.files:
         if file.type == 'zip':

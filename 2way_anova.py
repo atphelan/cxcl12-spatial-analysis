@@ -128,9 +128,9 @@ def aggregate_and_analyse_resampling_files(target_directory, dependent, print_ti
     print('')
 
 # aggregate_and_analyse_resampling_files_normalised('data', 'cell_density', print_tile_count=False, adjustment_factor=1E6, rounding=1)
-# aggregate_and_analyse_resampling_files_normalised('data', 'cell_density_whole_mask', adjustment_factor=1E6, rounding=1)
+aggregate_and_analyse_resampling_files_normalised('data', 'cell_density_whole_mask', adjustment_factor=1E6, rounding=1)
 # aggregate_and_analyse_resampling_files_normalised('data', 'frac_dense_area', rounding=3)
 # aggregate_and_analyse_resampling_files_normalised('data', 'frac_sparse_area', rounding=3)
 # aggregate_and_analyse_resampling_files_normalised('data', 'frac_hole_area', rounding=3)
-aggregate_and_analyse_resampling_files_normalised('data', 'frac_density_change', rounding=3)
+# aggregate_and_analyse_resampling_files_normalised('data', 'frac_density_change', rounding=3)
 

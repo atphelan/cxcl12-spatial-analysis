@@ -134,7 +134,7 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
             if file.name in (
                 'M5femur_results_save states.csv',
-                # 'M2hip_results_save states.csv'
+                'M2hip_results_save states.csv'
             ):
                 # Dark spots in GFP image not well accounted for in whole
                 # mask density — use reconstructed-area density directly
