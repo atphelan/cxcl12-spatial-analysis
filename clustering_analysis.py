@@ -134,11 +134,16 @@ def run_paired_statistics(target_directory, metrics=None, min_windows=3):
 
             if file.name in (
                 'M5femur_results_save states.csv',
-                'M2hip_results_save states.csv'
+                # 'M2hip_results_save states.csv'
             ):
                 # Dark spots in GFP image not well accounted for in whole
                 # mask density — use reconstructed-area density directly
                 df['cell_density_whole_mask'] = df['cell_density']
+            elif file.name in (
+                # 'M5femur_results_save states.csv',
+                'M2hip_results_save states.csv'
+            ):
+                df['cell_density_whole_mask'] = (0.1 * df['cell_density'] + 0.9 * df['cell_density_whole_mask'])
 
             df.reset_index(drop=True).to_csv(file.path)
 

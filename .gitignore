@@ -208,6 +208,8 @@ __marimo__/
 
 save_states/*
 data/other_data
+old code/*
+.vscode/*
 
 *.tif
 .DS_store

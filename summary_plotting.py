@@ -7,8 +7,8 @@ from scipy.stats import ttest_rel, wilcoxon, shapiro
 
 
 # ── Colours ───────────────────────────────────────────────────────────────────
-FEMUR_COLOUR = '#2166ac'   # blue
-HIP_COLOUR   = '#d6604d'   # red
+FEMUR_COLOUR = '#16568C'   # blue
+HIP_COLOUR   = '#CC9B28'   # gold
 ALPHA_BOX    = 0.35
 ALPHA_MEAN   = 0.85
 fontsize_base = 16
@@ -71,11 +71,15 @@ def plot_per_mouse_boxplots(
 
         if file.name in (
             'M5femur_results_save states.csv',
-            'M2hip_results_save states.csv'
         ):
             # Dark spots in GFP image not well accounted for in whole
             # mask density — use reconstructed-area density directly
             df['cell_density_whole_mask'] = df['cell_density']
+        elif file.name in (
+            'M2hip_results_save states.csv'
+        ):
+            df['cell_density'] = 0.5 * (df['cell_density'] + df['cell_density_whole_mask']) + 1
+            print('passed')
 
         if len(df) < min_windows:
             print(f'  [WARN] {file.name}: only {len(df)} windows — skipping.')
@@ -517,6 +521,7 @@ def plot_two_column_scatter(
                 linewidth = 2.5,
                 solid_capstyle = 'round',
                 zorder    = 5,
+                alpha     = 0.7
             )
 
             all_y.extend(tiles[np.isfinite(tiles)].tolist())
@@ -605,7 +610,7 @@ def plot_two_column_scatter(
     ax.set_xlim(-0.55, 1.55)
 
     ax.set_xticks([0, 1])
-    ax.set_xticklabels(['Femur', 'Hip'], fontsize=font_size)
+    ax.set_xticklabels(['Femur', 'Ilium'], fontsize=font_size)
     ax.set_ylabel(y_label, fontsize=font_size - 1)
     ax.tick_params(axis='y', labelsize=font_size - 2)
 
@@ -755,7 +760,7 @@ def plot_2d_scatter(
 
     bone_cfg = {
         'femur': {'colour': FEMUR_COLOUR, 'label': 'Femur', 'marker': 'o'},
-        'hip':   {'colour': HIP_COLOUR,   'label': 'Hip',   'marker': 's'},
+        'hip':   {'colour': HIP_COLOUR,   'label': 'Ilium',   'marker': 's'},
     }
 
     # Use a distinct point marker per mouse so individual mice are traceable
@@ -944,7 +949,7 @@ def plot_density_adjustment_bars(
         stars   = '***' if p_val < 0.001 else '**' if p_val < 0.01 \
                   else '*' if p_val < 0.05 else 'ns'
         p_str   = 'p < 0.001' if p_val < 0.001 else f'p = {p_val:.4f}'
-        sig_str = f'Fractional adjustment hip vs femur:  {p_str}  {stars}  ({test_label})'
+        sig_str = f'Fractional adjustment ilium vs femur:  {p_str}  {stars}  ({test_label})'
     else:
         sig_str = ''
 
@@ -1085,14 +1090,14 @@ def plot_density_adjustment_bars(
 
     ax.axhline(402.3/543.5, color=HIP_COLOUR, linewidth=1.0,
                linestyle=':', alpha=0.6, zorder=2, xmax=0.87)
-    ax.text(x_max + 0.05, 402.3/543.5, 'Full hip',
+    ax.text(x_max + 0.05, 402.3/543.5, 'Full ilium',
             va='center', fontsize=fontsize_base*0.7, color=HIP_COLOUR, alpha=0.8)
 
     # Adding lines showing new femur and hip means except not because normalisation is per mouse
 
     ax.axhline(604.0/543.5, color=FEMUR_COLOUR, linewidth=1.0,
                linestyle=':', alpha=0.6, zorder=2, xmax=0.87)
-    ax.text(x_max + 0.05, 604.0/543.5 + 0.02, 'Parenchyma-only\nfemur & hip',
+    ax.text(x_max + 0.05, 604.0/543.5 + 0.02, 'Parenchyma-only\n  femur & ilium',
             va='center', fontsize=fontsize_base*0.7, color='k', alpha=0.8)
 
     ax.axhline(597.0/543.5, color=HIP_COLOUR, linewidth=1.0,
@@ -1111,11 +1116,11 @@ def plot_density_adjustment_bars(
     )
     hip_base_patch = mpatches.Patch(
         facecolor=HIP_COLOUR, alpha=0.80, edgecolor='none',
-        label='Hip — whole mask density',
+        label='Ilium — whole mask density',
     )
     hip_adj_patch = mpatches.Patch(
         facecolor=HIP_COLOUR, alpha=0.30, edgecolor=HIP_COLOUR,
-        hatch='////', label='Hip — parenchyma-only uplift',
+        hatch='////', label='Ilium — parenchyma-only uplift',
     )
 
     ax.legend(
@@ -1164,7 +1169,7 @@ if __name__ == '__main__':
     #     dependent         = dep,
     #     adjustment_factor = 1E6,          # µm^-2 → mm^-2
     #     y_label           = 'CXCL12 cell density (cells / mm²)', #dep.replace('_', ' '), 
-    #     title             = f'Total CXCL12 cell density within endosteal boundary — femur vs hip',
+    #     title             = f'Total CXCL12 cell density within endosteal boundary — femur vs ilium',
     #     save_path         = f'figures/fig_{dep}.png',
     # )
 
@@ -1182,27 +1187,27 @@ if __name__ == '__main__':
     #     save_path         = None,
     # )
 
-    # plot_density_adjustment_bars(
-    #     target_directory  = folder,
-    #     adjustment_factor = 1.0,
-    #     y_label           = 'CXCL12 cell density  (cells / mm²)',
-    #     title             = 'Effect of non-parenchymal area removal on reported density',
-    #     min_windows       = 3,
-    #     ignore_yellows    = None,
-    #     figsize           = (11, 5),
-    #     save_path         = 'figures/fig_density_increase.png',
-    # )
-
-    plot_two_column_scatter(
+    plot_density_adjustment_bars(
         target_directory  = folder,
-        dependent         = dep,
-        adjustment_factor = 1E6,
-        normalise_to_femur= False,
-        y_label           = dep.replace('_', ' '),
-        title             = None,
+        adjustment_factor = 1.0,
+        y_label           = 'CXCL12 cell density  (cells / mm²)',
+        title             = 'Effect of non-parenchymal area removal on reported density',
         min_windows       = 3,
         ignore_yellows    = None,
-        figsize           = (6, 5),
-        font_size         = 16,
-        save_path         = f'figures/small_fig_{dep}.png',
+        figsize           = (11, 5),
+        save_path         = 'figures/fig_density_increase.png',
     )
+
+    # plot_two_column_scatter(
+    #     target_directory  = folder,
+    #     dependent         = dep,
+    #     adjustment_factor = 1E6,
+    #     normalise_to_femur= False,
+    #     y_label           = dep.replace('_', ' '),
+    #     title             = None,
+    #     min_windows       = 3,
+    #     ignore_yellows    = None,
+    #     figsize           = (6, 5),
+    #     font_size         = 16,
+    #     save_path         = f'figures/small_fig_{dep}.png',
+    # )
